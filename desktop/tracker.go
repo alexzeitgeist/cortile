@@ -15,12 +15,18 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const writeDebounce = 750 * time.Millisecond
+
 type Tracker struct {
 	Clients    map[xproto.Window]*store.Client // List of tracked clients
 	Workspaces map[store.Location]*Workspace   // List of workspaces per location
 	Channels   *Channels                       // Helper for channel communication
 	Handlers   *Handlers                       // Helper for event handlers
-
+	lastWrite  time.Time                       // Last time cache was written
+	writeDue   bool                            // Pending cache write flag
+	writeDueAt time.Time                       // Scheduled cache write timestamp
+	writeQueue chan bool                       // Queue to trigger async writes
+	writing    bool                            // Flag to prevent concurrent writes
 }
 type Channels struct {
 	Event  chan string // Channel for events
@@ -74,7 +80,11 @@ func CreateTracker() *Tracker {
 			SwapClient:   &Handler{},
 			SwapScreen:   &Handler{},
 		},
+		writeQueue: make(chan bool, 1),
 	}
+
+	// Start background writer
+	go tr.backgroundWriter()
 
 	// Attach to root events
 	store.OnStateUpdate(tr.onStateUpdate)
@@ -84,11 +94,17 @@ func CreateTracker() *Tracker {
 }
 
 func (tr *Tracker) Update() {
+	start := time.Now()
 	ws := tr.ActiveWorkspace()
 	if ws.TilingDisabled() {
 		return
 	}
 	log.Debug("Update trackable clients [", len(tr.Clients), "/", len(store.Windows.Stacked), "]")
+
+	added := 0
+	updated := 0
+	skipped := 0
+	ignored := 0
 
 	// Map trackable windows
 	trackable := make(map[xproto.Window]bool)
@@ -96,19 +112,47 @@ func (tr *Tracker) Update() {
 		trackable[w.Id] = tr.isTrackable(w.Id)
 	}
 
-	// Remove untrackable windows
+	// Remove untrackable windows and update tracked ones
+	removed := 0
 	for w := range tr.Clients {
 		if !trackable[w] {
 			tr.untrackWindow(w)
+			removed++
+		} else {
+			// Only update clients on the current desktop to avoid unnecessary X11 calls
+			if c := tr.Clients[w]; c != nil {
+				if c.Latest != nil && c.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
+					c.Update()
+					updated++
+				}
+			}
+			skipped++
 		}
 	}
 
 	// Add trackable windows
 	for _, w := range store.Windows.Stacked {
 		if trackable[w.Id] {
-			tr.trackWindow(w.Id)
+			if !tr.isTracked(w.Id) {
+				tr.trackWindow(w.Id)
+				added++
+			}
+		} else {
+			ignored++
 		}
 	}
+
+	log.WithFields(log.Fields{
+		"currentDesk": store.Workplace.CurrentDesktop,
+		"tracked":     len(tr.Clients),
+		"windows":     len(store.Windows.Stacked),
+		"added":       added,
+		"updated":     updated,
+		"skipped":     skipped,
+		"ignored":     ignored,
+		"removed":     removed,
+		"elapsed":     time.Since(start),
+	}).Debug("tracker.update.stats")
 }
 
 func (tr *Tracker) Reset() {
@@ -126,7 +170,38 @@ func (tr *Tracker) Reset() {
 	tr.Channels.Event <- "workplace_change"
 }
 
+func (tr *Tracker) backgroundWriter() {
+	for range tr.writeQueue {
+		tr.doWrite()
+	}
+}
+
 func (tr *Tracker) Write() {
+	// Enqueue write request (non-blocking)
+	select {
+	case tr.writeQueue <- true:
+		log.Debug("tracker.write.enqueued")
+	default:
+		log.Trace("tracker.write.already-queued")
+	}
+}
+
+func (tr *Tracker) doWrite() {
+	if tr.writing {
+		log.Trace("tracker.write.skip-concurrent")
+		return
+	}
+	tr.writing = true
+	defer func() { tr.writing = false }()
+
+	start := time.Now()
+	log.WithFields(log.Fields{
+		"clients":    len(tr.Clients),
+		"workspaces": len(tr.Workspaces),
+		"desk":       store.Workplace.CurrentDesktop,
+	}).Debug("tracker.write.start")
+
+	tr.writeDue = false
 
 	// Write client cache
 	for _, c := range tr.Clients {
@@ -137,6 +212,13 @@ func (tr *Tracker) Write() {
 	for _, ws := range tr.Workspaces {
 		ws.Write()
 	}
+
+	elapsed := time.Since(start)
+	log.WithFields(log.Fields{
+		"clients":    len(tr.Clients),
+		"workspaces": len(tr.Workspaces),
+		"elapsed":    elapsed,
+	}).Debug("tracker.write.complete")
 
 	// Communicate windows change
 	tr.Channels.Event <- "windows_change"
@@ -323,16 +405,30 @@ func (tr *Tracker) handleMinimizedClient(c *store.Client) {
 		return
 	}
 
-	// Client minimized
-	if store.IsMinimized(store.GetInfo(c.Window.Id)) {
-		ws := tr.ClientWorkspace(c)
-		if ws.TilingDisabled() {
+	ws := tr.ClientWorkspace(c)
+	if ws == nil || ws.TilingDisabled() {
+		return
+	}
+
+	// Check if client is hidden/minimized
+	hidden := store.IsMinimized(store.GetInfo(c.Window.Id))
+
+	if hidden {
+		if c.Hidden {
 			return
 		}
-		log.Debug("Client minimized handler fired [", c.Latest.Class, "]")
+		c.Hidden = true
+		log.Debug("Client hidden handler fired [", c.Latest.Class, "]")
+		ws.RemoveClient(c)
+		ws.Tile()
+		return
+	}
 
-		// Untrack client
-		tr.untrackWindow(c.Window.Id)
+	if c.Hidden {
+		c.Hidden = false
+		log.Debug("Client restore handler fired [", c.Latest.Class, "]")
+		ws.AddClient(c)
+		ws.Tile()
 	}
 }
 
@@ -509,12 +605,14 @@ func (tr *Tracker) handleWorkspaceChange(h *Handler) {
 }
 
 func (tr *Tracker) onStateUpdate(state string, desktop uint, screen uint) {
+	start := time.Now()
 	workplaceChanged := store.Workplace.DesktopCount*store.Workplace.ScreenCount != uint(len(tr.Workspaces))
 	workspaceChanged := common.IsInList(state, []string{"_NET_CURRENT_DESKTOP"})
 
 	viewportChanged := common.IsInList(state, []string{"_NET_NUMBER_OF_DESKTOPS", "_NET_DESKTOP_LAYOUT", "_NET_DESKTOP_GEOMETRY", "_NET_DESKTOP_VIEWPORT", "_NET_WORKAREA"})
-	clientsChanged := common.IsInList(state, []string{"_NET_CLIENT_LIST_STACKING"})
+	clientListChanged := common.IsInList(state, []string{"_NET_CLIENT_LIST_STACKING"})
 	focusChanged := common.IsInList(state, []string{"_NET_ACTIVE_WINDOW"})
+	clientsChanged := clientListChanged || focusChanged
 
 	if workplaceChanged {
 
@@ -532,7 +630,7 @@ func (tr *Tracker) onStateUpdate(state string, desktop uint, screen uint) {
 		}
 	}
 
-	if viewportChanged || clientsChanged || focusChanged {
+	if viewportChanged || clientsChanged {
 
 		// Deactivate handlers
 		tr.Handlers.Reset()
@@ -544,10 +642,19 @@ func (tr *Tracker) onStateUpdate(state string, desktop uint, screen uint) {
 		tr.Update()
 	}
 
-	if focusChanged {
+	// Persist cache only when topology really changed
+	if workplaceChanged || clientListChanged {
+		tr.scheduleWrite()
+	}
 
-		// Write client and workspace cache
-		tr.Write()
+	tr.maybeWrite()
+
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Millisecond {
+		log.WithFields(log.Fields{
+			"event":   state,
+			"elapsed": elapsed,
+		}).Debug("tracker.onStateUpdate")
 	}
 }
 
@@ -632,4 +739,29 @@ func (tr *Tracker) isTracked(w xproto.Window) bool {
 func (tr *Tracker) isTrackable(w xproto.Window) bool {
 	info := store.GetInfo(w)
 	return !store.IsSpecial(info) && !store.IsIgnored(info)
+}
+
+func (tr *Tracker) scheduleWrite() {
+	deadline := time.Now().Add(writeDebounce)
+	if !tr.writeDue || deadline.Before(tr.writeDueAt) {
+		tr.writeDueAt = deadline
+	}
+	tr.writeDue = true
+	log.WithFields(log.Fields{
+		"deadline": tr.writeDueAt,
+	}).Trace("tracker.write.scheduled")
+}
+
+func (tr *Tracker) maybeWrite() {
+	if !tr.writeDue {
+		return
+	}
+	remaining := time.Until(tr.writeDueAt)
+	if remaining > 0 {
+		log.WithField("remaining", remaining).Trace("tracker.write.debounce")
+		return
+	}
+	tr.Write()
+	tr.lastWrite = time.Now()
+	tr.writeDue = false
 }
