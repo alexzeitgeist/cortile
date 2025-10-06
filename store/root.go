@@ -22,11 +22,13 @@ import (
 )
 
 var (
-	X             *xgbutil.XUtil  // X connection
-	WindowManager *XWindowManager // X window manager
-	Workplace     *XWorkplace     // X workplace
-	Pointer       *XPointer       // X pointer
-	Windows       *XWindows       // X windows
+	X                  *xgbutil.XUtil  // X connection
+	WindowManager      *XWindowManager // X window manager
+	Workplace          *XWorkplace     // X workplace
+	Pointer            *XPointer       // X pointer
+	Windows            *XWindows       // X windows
+	displaysCache      XDisplays       // Cached display configuration
+	displaysCacheValid bool            // Whether the cache is valid
 )
 
 type XWindowManager struct {
@@ -283,8 +285,10 @@ func DisplaysGet(X *xgbutil.XUtil) XDisplays {
 	}
 
 	// Get physical heads
+	headsStart := time.Now()
 	screens := PhysicalHeadsGet(X)
 	desktops := PhysicalHeadsGet(X)
+	headsElapsed := time.Since(headsStart)
 
 	// Get heads name
 	for _, screen := range screens {
@@ -300,6 +304,7 @@ func DisplaysGet(X *xgbutil.XUtil) XDisplays {
 	}
 
 	// Get margins of desktop panels
+	strutStart := time.Now()
 	for _, w := range Windows.Stacked {
 		strut, err := ewmh.WmStrutPartialGet(X, w.Id)
 		if err != nil {
@@ -313,6 +318,7 @@ func DisplaysGet(X *xgbutil.XUtil) XDisplays {
 			strut.TopStartX, strut.TopEndX, strut.BottomStartX, strut.BottomEndX,
 		)
 	}
+	strutElapsed := time.Since(strutStart)
 
 	// Update desktop geometry
 	for i := range desktops {
@@ -324,6 +330,14 @@ func DisplaysGet(X *xgbutil.XUtil) XDisplays {
 	heads.Screens = screens
 	heads.Desktops = desktops
 	heads.Corners = CreateCorners(screens)
+
+	if headsElapsed > 1*time.Millisecond || strutElapsed > 1*time.Millisecond {
+		log.WithFields(log.Fields{
+			"headsElapsed": headsElapsed,
+			"strutElapsed": strutElapsed,
+			"windowCount":  len(Windows.Stacked),
+		}).Debug("DisplaysGet.timing")
+	}
 
 	// Update screen count
 	Workplace.ScreenCount = uint(len(heads.Screens))
@@ -520,6 +534,7 @@ func PointerUpdate(X *xgbutil.XUtil) *XPointer {
 }
 
 func StateUpdate(X *xgbutil.XUtil, e xevent.PropertyNotifyEvent) {
+	start := time.Now()
 
 	// Obtain atom name from property event
 	aname, err := xprop.AtomName(X, e.Atom)
@@ -533,13 +548,49 @@ func StateUpdate(X *xgbutil.XUtil, e xevent.PropertyNotifyEvent) {
 		Workplace.DesktopCount = NumberOfDesktopsGet(X)
 	} else if common.IsInList(aname, []string{"_NET_CURRENT_DESKTOP"}) {
 		Workplace.CurrentDesktop = CurrentDesktopGet(X)
-	} else if common.IsInList(aname, []string{"_NET_DESKTOP_LAYOUT", "_NET_DESKTOP_GEOMETRY", "_NET_DESKTOP_VIEWPORT", "_NET_WORKAREA"}) {
+	} else if common.IsInList(aname, []string{"_NET_DESKTOP_LAYOUT", "_NET_DESKTOP_GEOMETRY", "_NET_WORKAREA"}) {
+		// These events indicate actual screen configuration changes
+		displayStart := time.Now()
 		Workplace.Displays = DisplaysGet(X)
+		displaysCache = Workplace.Displays
+		displaysCacheValid = true
+		displayElapsed := time.Since(displayStart)
+		log.WithFields(log.Fields{
+			"event":          aname,
+			"displayElapsed": displayElapsed,
+		}).Debug("store.StateUpdate.displayGet.refresh")
+	} else if common.IsInList(aname, []string{"_NET_DESKTOP_VIEWPORT"}) {
+		// Viewport changes (workspace switches) use cached display info
+		if displaysCacheValid {
+			Workplace.Displays = displaysCache
+			log.WithFields(log.Fields{
+				"event": aname,
+			}).Trace("store.StateUpdate.displayCache.hit")
+		} else {
+			displayStart := time.Now()
+			Workplace.Displays = DisplaysGet(X)
+			displaysCache = Workplace.Displays
+			displaysCacheValid = true
+			displayElapsed := time.Since(displayStart)
+			log.WithFields(log.Fields{
+				"event":          aname,
+				"displayElapsed": displayElapsed,
+			}).Debug("store.StateUpdate.displayGet")
+		}
 	} else if common.IsInList(aname, []string{"_NET_CLIENT_LIST_STACKING"}) {
 		Windows.Stacked = ClientListStackingGet(X)
 	} else if common.IsInList(aname, []string{"_NET_ACTIVE_WINDOW"}) {
 		Windows.Active = ActiveWindowGet(X)
 	}
+
+	elapsed := time.Since(start)
+	if elapsed > 1*time.Millisecond {
+		log.WithFields(log.Fields{
+			"event":   aname,
+			"elapsed": elapsed,
+		}).Debug("store.StateUpdate")
+	}
+
 	stateCallbacks(aname, Workplace.CurrentDesktop, Workplace.CurrentScreen)
 }
 

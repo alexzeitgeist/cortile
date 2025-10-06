@@ -26,11 +26,13 @@ import (
 )
 
 type Client struct {
-	Window   *XWindow // X window object
-	Original *Info    `json:"-"` // Original client window information
-	Cached   *Info    `json:"-"` // Cached client window information
-	Latest   *Info    // Latest client window information
-	Locked   bool     // Internal client move/resize lock
+	Window   *XWindow  // X window object
+	Created  time.Time // Internal client creation time
+	Locked   bool      // Internal client move/resize lock
+	Hidden   bool      `json:"-"` // Internal minimized/hidden state
+	Original *Info     `json:"-"` // Original client window information
+	Cached   *Info     `json:"-"` // Cached client window information
+	Latest   *Info     // Latest client window information
 }
 
 type Info struct {
@@ -63,12 +65,15 @@ const (
 )
 
 func CreateClient(w xproto.Window) *Client {
+	info := GetInfo(w)
 	c := &Client{
 		Window:   CreateXWindow(w),
-		Original: GetInfo(w),
-		Cached:   GetInfo(w),
-		Latest:   GetInfo(w),
+		Created:  time.Now(),
 		Locked:   false,
+		Hidden:   common.IsInList("_NET_WM_STATE_HIDDEN", info.States),
+		Original: info,
+		Cached:   info,
+		Latest:   info,
 	}
 
 	// Read client from cache
@@ -331,11 +336,16 @@ func (c *Client) Restore(flag uint8) {
 }
 
 func (c *Client) Update() {
+	start := time.Now()
 	info := GetInfo(c.Window.Id)
+	elapsed := time.Since(start)
 	if len(info.Class) == 0 {
 		return
 	}
-	log.Debug("Update client info [", info.Class, "]")
+	log.WithFields(log.Fields{
+		"class":   info.Class,
+		"elapsed": elapsed,
+	}).Debug("client.update")
 
 	// Update client info
 	c.Latest = info
@@ -345,9 +355,15 @@ func (c *Client) Write() {
 	if common.CacheDisabled() {
 		return
 	}
+	start := time.Now()
 
 	// Obtain cache object
 	cache := c.Cache()
+	log.WithFields(log.Fields{
+		"client": c.Latest.Class,
+		"desk":   c.Latest.Location.Desktop,
+		"path":   cache.Name,
+	}).Debug("client.cache.write.start")
 
 	// Parse client cache
 	data, err := json.MarshalIndent(cache.Data, "", "  ")
@@ -364,7 +380,12 @@ func (c *Client) Write() {
 		return
 	}
 
-	log.Trace("Write client cache data ", cache.Name, " [", c.Latest.Class, "]")
+	elapsed := time.Since(start)
+	log.WithFields(log.Fields{
+		"client":  c.Latest.Class,
+		"path":    cache.Name,
+		"elapsed": elapsed,
+	}).Debug("client.cache.write.complete")
 }
 
 func (c *Client) Read() *Client {
