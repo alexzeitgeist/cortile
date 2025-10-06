@@ -18,7 +18,8 @@ var (
 )
 
 func BindMouse(tr *desktop.Tracker) {
-	poll(100, func() {
+	interval := calculatePollInterval()
+	poll(interval, func() {
 		store.PointerUpdate(store.X)
 
 		// Reset tracker handler
@@ -67,6 +68,11 @@ func updateWorkspace(tr *desktop.Tracker) {
 }
 
 func updateCorner(tr *desktop.Tracker) {
+	// Skip if no corners configured
+	if !hasConfiguredCorners() {
+		return
+	}
+
 	hc := store.HotCorner()
 	if hc == nil {
 		return
@@ -80,6 +86,11 @@ func updateCorner(tr *desktop.Tracker) {
 }
 
 func updateFocus(tr *desktop.Tracker) {
+	// Skip entirely if focus-follows-mouse disabled
+	if common.Config.WindowFocusDelay == 0 {
+		return
+	}
+
 	ws := tr.ActiveWorkspace()
 	if ws == nil || pointer == nil || hover != nil {
 		return
@@ -99,9 +110,6 @@ func updateFocus(tr *desktop.Tracker) {
 	log.Info("Hovered window updated [", hovered.Latest.Class, "]")
 
 	// Delay hover event by given duration
-	if common.Config.WindowFocusDelay == 0 {
-		return
-	}
 	hover = time.AfterFunc(time.Duration(common.Config.WindowFocusDelay)*time.Millisecond, func() {
 		hover = nil
 
@@ -123,4 +131,24 @@ func poll(t time.Duration, fun func()) {
 			fun()
 		}
 	}()
+}
+
+func calculatePollInterval() time.Duration {
+	// Fast polling if focus-follows-mouse enabled (needs responsiveness)
+	if common.Config.WindowFocusDelay > 0 {
+		return 100 // 100ms = 10Hz
+	}
+
+	// Slower polling for just hot corners + drag detection
+	// 200ms still very responsive for corner triggers
+	return 200 // 200ms = 5Hz
+}
+
+func hasConfiguredCorners() bool {
+	for _, action := range common.Config.Corners {
+		if action != "" {
+			return true
+		}
+	}
+	return false
 }
