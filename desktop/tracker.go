@@ -738,6 +738,17 @@ func (tr *Tracker) isTracked(w xproto.Window) bool {
 
 func (tr *Tracker) isTrackable(w xproto.Window) bool {
 	info := store.GetInfo(w)
+	return tr.isTrackableInfo(info)
+}
+
+func (tr *Tracker) isTrackableInfo(info *store.Info) bool {
+	if info == nil {
+		return false
+	}
+	// Allow hidden windows on other desktops to remain trackable
+	if common.IsInList("_NET_WM_STATE_HIDDEN", info.States) && info.Location.Desktop != store.Workplace.CurrentDesktop {
+		return !store.IsIgnored(info)
+	}
 	return !store.IsSpecial(info) && !store.IsIgnored(info)
 }
 

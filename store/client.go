@@ -483,6 +483,10 @@ func IsSpecial(info *Info) bool {
 		"_NET_WM_STATE_SKIP_TASKBAR",
 	}
 	for _, state := range info.States {
+		// Allow hidden windows on other desktops to remain trackable
+		if state == "_NET_WM_STATE_HIDDEN" && info.Location.Desktop != Workplace.CurrentDesktop {
+			continue
+		}
 		if common.IsInList(state, states) {
 			log.Info("Ignore window with state ", state, " [", info.Class, "]")
 			return true
