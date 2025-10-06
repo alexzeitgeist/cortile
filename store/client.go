@@ -372,13 +372,48 @@ func (c *Client) Write() {
 		return
 	}
 
-	// Write client cache
+	// Write client cache atomically to avoid partial files that break reads
 	path := filepath.Join(cache.Folder, cache.Name)
-	err = os.WriteFile(path, data, 0644)
+	tmp, err := os.CreateTemp(cache.Folder, cache.Name+".tmp-*")
 	if err != nil {
-		log.Warn("Error writing client cache [", c.Latest.Class, "]")
+		log.Warn("Error creating client cache temp file [", c.Latest.Class, "]")
 		return
 	}
+	tmpName := tmp.Name()
+	closed := false
+	cleanup := func() {
+		if !closed {
+			tmp.Close()
+		}
+		os.Remove(tmpName)
+	}
+	defer func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
+	if _, err = tmp.Write(data); err != nil {
+		log.Warn("Error writing client cache temp file [", c.Latest.Class, "]")
+		return
+	}
+	if err = tmp.Sync(); err != nil {
+		log.Warn("Error syncing client cache temp file [", c.Latest.Class, "]")
+		return
+	}
+	if err = tmp.Close(); err != nil {
+		log.Warn("Error closing client cache temp file [", c.Latest.Class, "]")
+		return
+	}
+	closed = true
+	if err = os.Chmod(tmpName, 0644); err != nil {
+		log.Warn("Error chmod client cache temp file [", c.Latest.Class, "]")
+		return
+	}
+	if err = os.Rename(tmpName, path); err != nil {
+		log.Warn("Error replacing client cache [", c.Latest.Class, "]")
+		return
+	}
+	cleanup = nil
 
 	elapsed := time.Since(start)
 	log.WithFields(log.Fields{
@@ -401,6 +436,14 @@ func (c *Client) Read() *Client {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		log.Info("No client cache found [", c.Latest.Class, "]")
+		return c
+	}
+	if err != nil {
+		log.Warn("Error opening client cache [", c.Latest.Class, "]")
+		return c
+	}
+	if len(data) == 0 {
+		log.Warn("Empty client cache [", c.Latest.Class, "]")
 		return c
 	}
 

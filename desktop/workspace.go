@@ -261,13 +261,48 @@ func (ws *Workspace) Write() {
 		return
 	}
 
-	// Write workspace cache
+	// Write workspace cache atomically to avoid partial files
 	path := filepath.Join(cache.Folder, cache.Name)
-	err = os.WriteFile(path, data, 0644)
+	tmp, err := os.CreateTemp(cache.Folder, cache.Name+".tmp-*")
 	if err != nil {
-		log.Warn("Error writing workspace cache [", ws.Name, "]")
+		log.Warn("Error creating workspace cache temp file [", ws.Name, "]")
 		return
 	}
+	tmpName := tmp.Name()
+	closed := false
+	cleanup := func() {
+		if !closed {
+			tmp.Close()
+		}
+		os.Remove(tmpName)
+	}
+	defer func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
+	if _, err = tmp.Write(data); err != nil {
+		log.Warn("Error writing workspace cache temp file [", ws.Name, "]")
+		return
+	}
+	if err = tmp.Sync(); err != nil {
+		log.Warn("Error syncing workspace cache temp file [", ws.Name, "]")
+		return
+	}
+	if err = tmp.Close(); err != nil {
+		log.Warn("Error closing workspace cache temp file [", ws.Name, "]")
+		return
+	}
+	closed = true
+	if err = os.Chmod(tmpName, 0644); err != nil {
+		log.Warn("Error chmod workspace cache temp file [", ws.Name, "]")
+		return
+	}
+	if err = os.Rename(tmpName, path); err != nil {
+		log.Warn("Error replacing workspace cache [", ws.Name, "]")
+		return
+	}
+	cleanup = nil
 
 	log.Trace("Write workspace cache data ", cache.Name, " [", ws.Name, "]")
 }
