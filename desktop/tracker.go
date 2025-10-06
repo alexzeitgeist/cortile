@@ -195,29 +195,48 @@ func (tr *Tracker) doWrite() {
 	defer func() { tr.writing = false }()
 
 	start := time.Now()
+
+	// Count dirty items before writing
+	clientsDirty := 0
+	for _, c := range tr.Clients {
+		if c.IsDirty() {
+			clientsDirty++
+		}
+	}
+	workspacesDirty := 0
+	for _, ws := range tr.Workspaces {
+		if ws.IsDirty() {
+			workspacesDirty++
+		}
+	}
+
 	log.WithFields(log.Fields{
-		"clients":    len(tr.Clients),
-		"workspaces": len(tr.Workspaces),
-		"desk":       store.Workplace.CurrentDesktop,
+		"clients":         len(tr.Clients),
+		"clientsDirty":    clientsDirty,
+		"workspaces":      len(tr.Workspaces),
+		"workspacesDirty": workspacesDirty,
+		"desk":            store.Workplace.CurrentDesktop,
 	}).Debug("tracker.write.start")
 
 	tr.writeDue = false
 
-	// Write client cache
+	// Write client cache (only dirty clients)
 	for _, c := range tr.Clients {
 		c.Write()
 	}
 
-	// Write workspace cache
+	// Write workspace cache (only dirty workspaces)
 	for _, ws := range tr.Workspaces {
 		ws.Write()
 	}
 
 	elapsed := time.Since(start)
 	log.WithFields(log.Fields{
-		"clients":    len(tr.Clients),
-		"workspaces": len(tr.Workspaces),
-		"elapsed":    elapsed,
+		"clients":           len(tr.Clients),
+		"clientsWritten":    clientsDirty,
+		"workspaces":        len(tr.Workspaces),
+		"workspacesWritten": workspacesDirty,
+		"elapsed":           elapsed,
 	}).Debug("tracker.write.complete")
 
 	// Communicate windows change
@@ -478,6 +497,7 @@ func (tr *Tracker) handleResizeClient(c *store.Client) {
 				Left:   cx != px,
 			}
 			ws.ActiveLayout().UpdateProportions(c, dir)
+			ws.MarkDirty() // Mark workspace dirty after proportion changes
 		}
 
 		// Tile workspace
@@ -551,6 +571,11 @@ func (tr *Tracker) handleSwapClient(h *Handler) {
 	mg := ws.ActiveLayout().GetManager()
 	mg.SwapClient(c, target)
 
+	// Mark workspace and clients dirty
+	ws.MarkDirty()
+	c.MarkDirty()
+	target.MarkDirty()
+
 	// Reset client swapping handler
 	h.Reset()
 
@@ -591,6 +616,8 @@ func (tr *Tracker) handleWorkspaceChange(h *Handler) {
 	ws.AddClient(c)
 	if master {
 		mg.MakeMaster(c)
+		ws.MarkDirty()
+		c.MarkDirty()
 	}
 
 	// Tile new workspace

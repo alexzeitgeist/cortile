@@ -33,6 +33,7 @@ type Client struct {
 	Original *Info     `json:"-"` // Original client window information
 	Cached   *Info     `json:"-"` // Cached client window information
 	Latest   *Info     // Latest client window information
+	dirty    bool      // Internal flag for cache write optimization
 }
 
 type Info struct {
@@ -74,6 +75,7 @@ func CreateClient(w xproto.Window) *Client {
 		Original: info,
 		Cached:   info,
 		Latest:   info,
+		dirty:    true, // Mark new clients dirty to ensure initial write
 	}
 
 	// Read client from cache
@@ -100,6 +102,40 @@ func (c *Client) Lock() {
 
 func (c *Client) UnLock() {
 	c.Locked = false
+}
+
+func (c *Client) MarkDirty() {
+	c.dirty = true
+}
+
+func (c *Client) IsDirty() bool {
+	return c.dirty
+}
+
+// filterPersistentStates returns only states that matter for cache persistence.
+// Transient states like focus or attention don't affect window restoration.
+func filterPersistentStates(states []string) []string {
+	persistent := make([]string, 0, len(states))
+	for _, state := range states {
+		// Only keep states that affect geometry or need restoration
+		switch state {
+		case "_NET_WM_STATE_MAXIMIZED_VERT",
+			"_NET_WM_STATE_MAXIMIZED_HORZ",
+			"_NET_WM_STATE_FULLSCREEN",
+			"_NET_WM_STATE_HIDDEN",
+			"_NET_WM_STATE_STICKY",
+			"_NET_WM_STATE_SHADED",
+			"_NET_WM_STATE_SKIP_TASKBAR",
+			"_NET_WM_STATE_SKIP_PAGER",
+			"_NET_WM_STATE_ABOVE",
+			"_NET_WM_STATE_BELOW":
+			persistent = append(persistent, state)
+		// Skip transient states like:
+		// - _NET_WM_STATE_FOCUSED (changes with every focus)
+		// - _NET_WM_STATE_DEMANDS_ATTENTION (temporary notification state)
+		}
+	}
+	return persistent
 }
 
 func (c *Client) Limit(w, h int) bool {
@@ -347,6 +383,30 @@ func (c *Client) Update() {
 		"elapsed": elapsed,
 	}).Debug("client.update")
 
+	// Check if geometry, states, or location changed
+	oldInfo := c.Latest
+	if oldInfo != nil {
+		geomChanged := !reflect.DeepEqual(info.Dimensions.Geometry, oldInfo.Dimensions.Geometry)
+		
+		// Only compare persistent states that matter for cache restoration
+		oldPersistentStates := filterPersistentStates(oldInfo.States)
+		newPersistentStates := filterPersistentStates(info.States)
+		statesChanged := !reflect.DeepEqual(newPersistentStates, oldPersistentStates)
+		
+		locationChanged := info.Location.Desktop != oldInfo.Location.Desktop ||
+			info.Location.Screen != oldInfo.Location.Screen
+
+		if geomChanged || statesChanged || locationChanged {
+			c.dirty = true
+			log.WithFields(log.Fields{
+				"class": info.Class,
+				"geom":  geomChanged,
+				"state": statesChanged,
+				"loc":   locationChanged,
+			}).Trace("client.marked.dirty")
+		}
+	}
+
 	// Update client info
 	c.Latest = info
 }
@@ -355,6 +415,13 @@ func (c *Client) Write() {
 	if common.CacheDisabled() {
 		return
 	}
+
+	// Skip write if not dirty
+	if !c.dirty {
+		log.Trace("Skip clean client cache write [", c.Latest.Class, "]")
+		return
+	}
+
 	start := time.Now()
 
 	// Obtain cache object
@@ -414,6 +481,9 @@ func (c *Client) Write() {
 		return
 	}
 	cleanup = nil
+
+	// Clear dirty flag after successful write
+	c.dirty = false
 
 	elapsed := time.Since(start)
 	log.WithFields(log.Fields{

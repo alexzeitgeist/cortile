@@ -184,6 +184,7 @@ func EnableDecoration(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 	mg := ws.ActiveLayout().GetManager()
 
 	mg.EnableDecoration()
+	ws.MarkDirty()
 	tr.Update()
 	tr.Tile(ws)
 
@@ -200,6 +201,7 @@ func DisableDecoration(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 	mg := ws.ActiveLayout().GetManager()
 
 	mg.DisableDecoration()
+	ws.MarkDirty()
 	tr.Update()
 	tr.Tile(ws)
 
@@ -235,6 +237,7 @@ func Reset(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		return false
 	}
 	ws.ResetLayouts()
+	ws.MarkDirty()
 	tr.Tile(ws)
 
 	ui.ShowLayout(ws)
@@ -376,6 +379,7 @@ func IncreaseSlave(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		return false
 	}
 	ws.ActiveLayout().IncreaseSlave()
+	ws.MarkDirty()
 	tr.Tile(ws)
 
 	ui.ShowLayout(ws)
@@ -389,6 +393,7 @@ func DecreaseSlave(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		return false
 	}
 	ws.ActiveLayout().DecreaseSlave()
+	ws.MarkDirty()
 	tr.Tile(ws)
 
 	ui.ShowLayout(ws)
@@ -402,6 +407,7 @@ func IncreaseMaster(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		return false
 	}
 	ws.ActiveLayout().IncreaseMaster()
+	ws.MarkDirty()
 	tr.Tile(ws)
 
 	ui.ShowLayout(ws)
@@ -415,6 +421,7 @@ func DecreaseMaster(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		return false
 	}
 	ws.ActiveLayout().DecreaseMaster()
+	ws.MarkDirty()
 	tr.Tile(ws)
 
 	ui.ShowLayout(ws)
@@ -483,6 +490,8 @@ func MakeMaster(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 	}
 
 	ws.ActiveLayout().MakeMaster(c)
+	ws.MarkDirty()
+	c.MarkDirty()
 	tr.Tile(ws)
 
 	return true
@@ -498,6 +507,8 @@ func MakeMasterNext(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 	}
 
 	ws.ActiveLayout().MakeMaster(c)
+	ws.MarkDirty()
+	c.MarkDirty()
 	tr.Tile(ws)
 
 	return NextWindow(tr, ws)
@@ -513,6 +524,8 @@ func MakeMasterPrevious(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 	}
 
 	ws.ActiveLayout().MakeMaster(c)
+	ws.MarkDirty()
+	c.MarkDirty()
 	tr.Tile(ws)
 
 	return PreviousWindow(tr, ws)
@@ -523,6 +536,7 @@ func IncreaseProportion(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		return false
 	}
 	ws.ActiveLayout().IncreaseProportion()
+	ws.MarkDirty()
 	tr.Tile(ws)
 
 	return true
@@ -533,6 +547,7 @@ func DecreaseProportion(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		return false
 	}
 	ws.ActiveLayout().DecreaseProportion()
+	ws.MarkDirty()
 	tr.Tile(ws)
 
 	return true

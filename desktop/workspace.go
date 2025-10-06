@@ -20,6 +20,7 @@ type Workspace struct {
 	Layouts  []Layout       // List of available layouts
 	Layout   uint           // Active layout index
 	Tiling   bool           // Tiling is enabled
+	dirty    bool           // Internal flag for cache write optimization
 }
 
 func CreateWorkspaces() map[store.Location]*Workspace {
@@ -36,6 +37,7 @@ func CreateWorkspaces() map[store.Location]*Workspace {
 				Layouts:  CreateLayouts(location),
 				Layout:   0,
 				Tiling:   common.Config.TilingEnabled,
+				dirty:    true, // Mark new workspaces dirty to ensure initial write
 			}
 
 			// Set default layout
@@ -84,10 +86,12 @@ func CreateLayouts(loc store.Location) []Layout {
 
 func (ws *Workspace) EnableTiling() {
 	ws.Tiling = true
+	ws.dirty = true
 }
 
 func (ws *Workspace) DisableTiling() {
 	ws.Tiling = false
+	ws.dirty = true
 }
 
 func (ws *Workspace) TilingEnabled() bool {
@@ -110,6 +114,15 @@ func (ws *Workspace) ActiveLayout() Layout {
 
 func (ws *Workspace) SetLayout(layout uint) {
 	ws.Layout = layout
+	ws.dirty = true
+}
+
+func (ws *Workspace) MarkDirty() {
+	ws.dirty = true
+}
+
+func (ws *Workspace) IsDirty() bool {
+	return ws.dirty
 }
 
 func (ws *Workspace) ResetLayouts() {
@@ -174,6 +187,10 @@ func (ws *Workspace) AddClient(c *store.Client) {
 	for _, l := range ws.Layouts {
 		l.AddClient(c)
 	}
+
+	// Mark workspace and client dirty
+	ws.dirty = true
+	c.MarkDirty()
 }
 
 func (ws *Workspace) RemoveClient(c *store.Client) {
@@ -189,6 +206,10 @@ func (ws *Workspace) RemoveClient(c *store.Client) {
 	for _, l := range ws.Layouts {
 		l.RemoveClient(c)
 	}
+
+	// Mark workspace and client dirty
+	ws.dirty = true
+	c.MarkDirty()
 }
 
 func (ws *Workspace) VisibleClients() []*store.Client {
@@ -251,6 +272,12 @@ func (ws *Workspace) Write() {
 		return
 	}
 
+	// Skip write if not dirty
+	if !ws.dirty {
+		log.Trace("Skip clean workspace cache write [", ws.Name, "]")
+		return
+	}
+
 	// Obtain cache object
 	cache := ws.Cache()
 
@@ -303,6 +330,9 @@ func (ws *Workspace) Write() {
 		return
 	}
 	cleanup = nil
+
+	// Clear dirty flag after successful write
+	ws.dirty = false
 
 	log.Trace("Write workspace cache data ", cache.Name, " [", ws.Name, "]")
 }
