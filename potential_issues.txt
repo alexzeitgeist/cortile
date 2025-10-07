@@ -1,0 +1,223 @@
+Potential issues by looking at the current changes in @diff_optimizations.txt:
+
+1. RESOLVED (Oct 7 2025): desktop/tracker.go now guards tracker state with `stateMu` and snapshots before iterating, so background writes no longer race with map mutations.
+
+2. High: desktop/tracker.go:179-188 makes Tracker.Write() fire-and-forget. Callers such as input/action.go:556-601 still rely on it being synchronous before syscall.Exec/os.Exit. Now the process can exit or exec before the goroutine finishes, so caches and “windows_change” notifications are dropped.
+
+3. RESOLVED (Oct 7 2025): Added mutex-protected debounce timer (`writeMu`/`writeTimer`) that flushes pending writes, ensuring deferred cache sync always executes.
+
+4. CRITICAL: Logic Error in Tracker.Update() - Double Counting
+
+   Location: desktop/tracker.go lines 122-130
+
+     } else {
+         // Only update clients on the current desktop to avoid unnecessary X11 calls
+         if c := tr.Clients[w]; c != nil {
+             if c.Latest != nil && c.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
+                 c.Update()
+                 updated++
+             }
+         }
+         skipped++  // ← BUG: This increments for ALL trackable windows
+     }
+
+   Problem: The skipped++ counter increments for every window that remains tracked,
+   including those where c.Update() was just called. This means windows are
+   double-counted in the stats (they're counted in both updated and skipped).
+
+   Fix: Move skipped++ into an else block:
+
+     if c.Latest != nil && c.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
+         c.Update()
+         updated++
+     } else {
+         skipped++
+     }
+
+
+5. POTENTIAL ISSUE: DisplaysCache Never Invalidated
+
+   Location: store/root.go lines 551-579
+
+   The cache is set to valid when displays are retrieved, but nowhere in the diff
+   is displaysCacheValid set back to false. This means:
+
+     - After the first _NET_DESKTOP_LAYOUT, _NET_DESKTOP_GEOMETRY, or _NET_WORKAREA event, the cache becomes valid
+     - For _NET_DESKTOP_VIEWPORT events (workspace switches), it uses the cached display info
+     - But if monitors are disconnected/reconnected or repositioned, and only a _NET_DESKTOP_VIEWPORT event is fired, stale display information would be used
+
+   Missing: The cache should be invalidated when:
+
+     - A RandR screen change event occurs
+     - The number of screens changes
+     - A geometric configuration change is detected
+
+6. MINOR: Incorrect Error Handling in Client.Read()
+
+   Location: store/client.go lines 511-518
+
+   The diff adds error checks after the os.IsNotExist(err) check:
+
+     if os.IsNotExist(err) {
+         log.Info("No client cache found [", c.Latest.Class, "]")
+         return c
+     }
+     if err != nil {  // ← This will never trigger after IsNotExist
+         log.Warn("Error opening client cache [", c.Latest.Class, "]")
+         return c
+     }
+
+   Problem: This is redundant. If os.IsNotExist(err) is false, then either err ==
+   nil or it's a different error. The second check should use else if:
+
+     if os.IsNotExist(err) {
+         log.Info("No client cache found [", c.Latest.Class, "]")
+         return c
+     } else if err != nil {
+         log.Warn("Error opening client cache [", c.Latest.Class, "]")
+         return c
+     }
+
+   Actually, looking at it more carefully: the current logic does work, but it's
+   less clear. After os.IsNotExist(err) returns the client, the subsequent if err
+   != nil won't execute due to the early return. So this is fine, just slightly
+   verbose.
+
+7. RACE CONDITION: Tracker.writing flag
+
+   Location: desktop/tracker.go lines 189-195
+
+     func (tr *Tracker) doWrite() {
+         if tr.writing {
+             log.Trace("tracker.write.skip-concurrent")
+             return
+         }
+         tr.writing = true
+         defer func() { tr.writing = false }()
+
+   Problem: The writing boolean is checked and set without mutex protection. While
+   the writeQueue channel provides some serialization, there's a theoretical race
+   where:
+
+     - Goroutine A checks tr.writing == false
+     - Goroutine B checks tr.writing == false
+     - Both set tr.writing = true
+     - Both proceed to write
+
+   However, since backgroundWriter() reads from a single channel in a loop, and
+   channels guarantee only one reader receives each message, this is actually safe.
+   The writing flag is defensive but the channel already serializes access.
+
+8. BEHAVIORAL CHANGE: Hidden Window Handling
+
+   Location: store/client.go lines 599-602
+
+     // Allow hidden windows on other desktops to remain trackable
+     if state == "_NET_WM_STATE_HIDDEN" && info.Location.Desktop != Workplace.CurrentDesktop {
+         continue
+     }
+
+   Change: Windows with _NET_WM_STATE_HIDDEN on non-current desktops are now
+   considered trackable.
+
+   Concern: This is an intentional behavioral change for the optimization (to track
+   windows on other desktops). However:
+
+     - Does cortile properly handle hidden windows in its layout calculations?
+     - Will this cause ghost windows to appear in tiling layouts?
+
+   This needs testing to ensure hidden windows don't disrupt layouts when switching
+   desktops.
+
+9. Performance Concern: Update() Selective Client Updates
+
+   Location: desktop/tracker.go lines 124-127
+
+     if c.Latest != nil && c.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
+         c.Update()
+         updated++
+     }
+
+   Optimization: Only updates clients on the current desktop to avoid X11 calls.
+
+   Potential Issue: If a window moves from desktop A to desktop B while you're on
+   desktop A, and then you switch to desktop B, the window's state on desktop B
+   might be stale until the next Update() call. This depends on:
+
+     - How often Update() is called
+     - Whether window moves trigger separate update mechanisms
+
+   This should be fine if desktop switches trigger a full Update(), but verify this
+   behavior.
+
+10. RESOLVED (Oct 7 2025): Deferred write state now lives behind `writeMu`; race detector passes (`go test -race ./...`).
+
+11. Logic Bug in Update() Method (desktop/tracker.go:68-76)
+
+  } else {
+      if c := tr.Clients[w]; c != nil {
+          if c.Latest != nil && c.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
+              c.Update()
+              updated++
+          }
+      }
+      skipped++  // ⚠️ BUG: Always executed, even when updated
+  }
+
+  Problem: skipped++ is incremented for ALL tracked windows, not just the ones that were actually skipped. Should be in an else clause.
+
+  Impact: Misleading debug metrics showing artificially high "skipped" counts.
+
+12. Memory Leak: Minimized Windows Never Cleaned Up (desktop/tracker.go:188-220)
+
+  Before: tr.untrackWindow(c.Window.Id) - removed from memoryAfter: ws.RemoveClient(c) - removed from layout but stays in tr.Clients
+
+  Problem: Minimized windows accumulate in tr.Clients map indefinitely unless the window is destroyed. If a user minimizes 100 windows over a session, all 100 remain in memory.
+
+  Impact: Memory growth over time, potential performance degradation with many minimized windows.
+
+13. Cache Write Trigger Change (desktop/tracker.go:281-289)
+
+  Before: Focus changes triggered immediate cache writesAfter: Only workspace/client list changes trigger writes
+
+  Analysis: This is actually correct since focus state isn't persisted in cache anyway. The old behavior was wasteful. ✅
+
+14. Hidden Windows Remain Trackable (desktop/tracker.go:312-313)
+
+  Before: Hidden windows were considered special/ignoredAfter: Hidden windows on non-current desktops remain trackable
+
+  Analysis: Intentional design change to support the new minimize handling, but increases memory footprint. Combined with issue #3, this could accumulate significant memory.
+
+15. Display Cache Has No TTL (store/root.go:953-954, 1017-1041)
+
+  Problem: The displaysCache is only invalidated by specific X11 events. If external tools (e.g., xrandr) reconfigure displays without triggering these events, stale cache could be served.
+
+  Impact: Likely low - the events covered (_NET_DESKTOP_LAYOUT, _NET_DESKTOP_GEOMETRY, _NET_WORKAREA) should catch most real configuration changes. But theoretically possible edge case.
+
+16. Data Loss on Application Exit (High-Risk Regression)
+      The new asynchronous and debounced cache writing (scheduleWrite, backgroundWriter) means there's a delay (e.g., 750ms) between a state change and when it's persisted to disk.
+       * Problem: If the application exits (either normally or by crashing) before a pending write is executed, that state change will be lost. For example, if a user changes a layout and
+         immediately logs out, the change may not be saved. Users typically expect window manager configurations to persist immediately.
+       * Recommendation: Implement a shutdown hook that flushes any pending cache writes, ensuring all data is saved before the application terminates.
+
+17. New Minimized Client Handling
+      The logic for minimized clients has been reworked in handleMinimizedClient. Instead of untracking them, they are now marked as Hidden and removed from the tiling layout.
+       * Problem: This creates a more complex state machine for clients. While it appears more robust, there's a risk of edge cases. For instance, if a window's state changes in another way
+         while it is marked as Hidden, it could potentially get "stuck" or not be correctly restored into the layout.
+       * Recommendation: This new logic should be tested thoroughly, especially with windows that change properties while minimized or on another desktop.
+
+18. Atomic Writes Implementation
+      The implementation of atomic writes in store/client.go and desktop/workspace.go uses defer for cleanup.
+       * Problem: In (c *Client) Write() and (ws *Workspace) Write(), the cleanup function is deferred. If os.Rename is successful, cleanup is set to nil. However, if os.Rename fails, the
+         deferred cleanup() will run, removing the temporary file. This means the old (stale) cache file remains, and the new (correct) data in the temp file is lost. While this is better than
+         a corrupt file, the latest state is still lost.
+       * Recommendation: This behavior is arguably correct for atomicity, but it's important to be aware that a failed rename will result in the state change being discarded. Ensure that errors
+         from os.Rename are logged with sufficient detail to diagnose filesystem or permission issues.
+
+19. Reliance on Manual `MarkDirty()` Calls
+      Many actions now rely on developers manually calling MarkDirty() to ensure changes are persisted (e.g., in input/action.go).
+       * Problem: While many calls have been added, it introduces a maintenance risk. If a new feature is added in the future that modifies a workspace or layout, the developer must remember to
+         call MarkDirty(). Forgetting to do so will result in changes that are not saved. The automatic dirty-checking in client.Update is excellent and less error-prone.
+       * Recommendation: This is a common trade-off. The current implementation is acceptable, but it's a point of fragility to be aware of during future development.
+
+       
