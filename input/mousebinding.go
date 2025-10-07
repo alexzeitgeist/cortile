@@ -18,21 +18,10 @@ var (
 )
 
 func BindMouse(tr *desktop.Tracker) {
-	interval := calculatePollInterval()
-	
-	// Log polling mode for user awareness
-	focusEnabled := common.Config.WindowFocusDelay > 0
-	cornersEnabled := hasConfiguredCorners()
-	
-	if !focusEnabled && !cornersEnabled {
-		log.Info("Mouse polling: minimal mode (500ms) - only drag detection and workspace tracking")
-		log.Info("Enable hot corners or focus-follows-mouse in config.toml for additional features")
-	} else if !focusEnabled {
-		log.Info("Mouse polling: medium mode (200ms) - hot corners enabled")
-	} else {
-		log.Info("Mouse polling: fast mode (100ms) - focus-follows-mouse enabled")
-	}
-	
+	interval := 100 * time.Millisecond
+
+	log.Info("Mouse polling interval set to 100ms")
+
 	poll(interval, func() {
 		store.PointerUpdate(store.X)
 
@@ -139,31 +128,12 @@ func updateFocus(tr *desktop.Tracker) {
 	})
 }
 
-func poll(t time.Duration, fun func()) {
+func poll(interval time.Duration, fun func()) {
 	go func() {
-		for range time.Tick(t * time.Millisecond) {
+		for range time.Tick(interval) {
 			fun()
 		}
 	}()
-}
-
-func calculatePollInterval() time.Duration {
-	focusEnabled := common.Config.WindowFocusDelay > 0
-	cornersEnabled := hasConfiguredCorners()
-
-	// Fast polling if focus-follows-mouse enabled (needs responsiveness)
-	if focusEnabled {
-		return 100 // 100ms = 10Hz
-	}
-
-	// Medium polling if hot corners enabled (needs responsive corner detection)
-	if cornersEnabled {
-		return 200 // 200ms = 5Hz
-	}
-
-	// Minimal polling for just drag detection and workspace tracking
-	// This is much slower but still detects window drags/swaps/screen changes
-	return 500 // 500ms = 2Hz
 }
 
 func hasConfiguredCorners() bool {
