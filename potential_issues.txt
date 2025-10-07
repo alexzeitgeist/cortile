@@ -6,33 +6,7 @@ Potential issues by looking at the current changes in @diff_optimizations.txt:
 
 3. RESOLVED (Oct 7 2025): Added mutex-protected debounce timer (`writeMu`/`writeTimer`) that flushes pending writes, ensuring deferred cache sync always executes.
 
-4. CRITICAL: Logic Error in Tracker.Update() - Double Counting
-
-   Location: desktop/tracker.go lines 122-130
-
-     } else {
-         // Only update clients on the current desktop to avoid unnecessary X11 calls
-         if c := tr.Clients[w]; c != nil {
-             if c.Latest != nil && c.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
-                 c.Update()
-                 updated++
-             }
-         }
-         skipped++  // ← BUG: This increments for ALL trackable windows
-     }
-
-   Problem: The skipped++ counter increments for every window that remains tracked,
-   including those where c.Update() was just called. This means windows are
-   double-counted in the stats (they're counted in both updated and skipped).
-
-   Fix: Move skipped++ into an else block:
-
-     if c.Latest != nil && c.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
-         c.Update()
-         updated++
-     } else {
-         skipped++
-     }
+4. RESOLVED (Oct 7 2025): `Update()` now only increments `skipped` when a client was not refreshed on the active desktop, so debug counters no longer double count updated windows.
 
 
 5. POTENTIAL ISSUE: DisplaysCache Never Invalidated
@@ -152,21 +126,7 @@ Potential issues by looking at the current changes in @diff_optimizations.txt:
 
 10. RESOLVED (Oct 7 2025): Deferred write state now lives behind `writeMu`; race detector passes (`go test -race ./...`).
 
-11. Logic Bug in Update() Method (desktop/tracker.go:68-76)
-
-  } else {
-      if c := tr.Clients[w]; c != nil {
-          if c.Latest != nil && c.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
-              c.Update()
-              updated++
-          }
-      }
-      skipped++  // ⚠️ BUG: Always executed, even when updated
-  }
-
-  Problem: skipped++ is incremented for ALL tracked windows, not just the ones that were actually skipped. Should be in an else clause.
-
-  Impact: Misleading debug metrics showing artificially high "skipped" counts.
+11. RESOLVED (Oct 7 2025): See item 4; mutually exclusive `updated`/`skipped` metrics are restored.
 
 12. Memory Leak: Minimized Windows Never Cleaned Up (desktop/tracker.go:188-220)
 
