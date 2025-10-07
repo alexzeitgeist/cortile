@@ -2,7 +2,7 @@ Potential issues by looking at the current changes in @diff_optimizations.txt:
 
 1. RESOLVED (Oct 7 2025): desktop/tracker.go now guards tracker state with `stateMu` and snapshots before iterating, so background writes no longer race with map mutations.
 
-2. High: desktop/tracker.go:179-188 makes Tracker.Write() fire-and-forget. Callers such as input/action.go:556-601 still rely on it being synchronous before syscall.Exec/os.Exit. Now the process can exit or exec before the goroutine finishes, so caches and “windows_change” notifications are dropped.
+2. RESOLVED (Oct 7 2025): Added `Tracker.Flush()` and switched shutdown paths to call it, so exit/restart waits for the cache write to finish before continuing.
 
 3. RESOLVED (Oct 7 2025): Added mutex-protected debounce timer (`writeMu`/`writeTimer`) that flushes pending writes, ensuring deferred cache sync always executes.
 
@@ -154,11 +154,7 @@ Potential issues by looking at the current changes in @diff_optimizations.txt:
 
   Impact: Likely low - the events covered (_NET_DESKTOP_LAYOUT, _NET_DESKTOP_GEOMETRY, _NET_WORKAREA) should catch most real configuration changes. But theoretically possible edge case.
 
-16. Data Loss on Application Exit (High-Risk Regression)
-      The new asynchronous and debounced cache writing (scheduleWrite, backgroundWriter) means there's a delay (e.g., 750ms) between a state change and when it's persisted to disk.
-       * Problem: If the application exits (either normally or by crashing) before a pending write is executed, that state change will be lost. For example, if a user changes a layout and
-         immediately logs out, the change may not be saved. Users typically expect window manager configurations to persist immediately.
-       * Recommendation: Implement a shutdown hook that flushes any pending cache writes, ensuring all data is saved before the application terminates.
+16. RESOLVED (Oct 7 2025): Shutdown now calls `Tracker.Flush()`, which stops the debounce timer and blocks until pending cache writes complete, eliminating the exit-time data loss window.
 
 17. New Minimized Client Handling
       The logic for minimized clients has been reworked in handleMinimizedClient. Instead of untracking them, they are now marked as Hidden and removed from the tiling layout.

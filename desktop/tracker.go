@@ -18,19 +18,23 @@ import (
 
 const writeDebounce = 750 * time.Millisecond
 
+type writeRequest struct {
+	done chan struct{}
+}
+
 type Tracker struct {
-	Clients    map[xproto.Window]*store.Client // List of tracked clients
-	Workspaces map[store.Location]*Workspace   // List of workspaces per location
-	Channels   *Channels                       // Helper for channel communication
-	Handlers   *Handlers                       // Helper for event handlers
-	lastWrite  time.Time                       // Last time cache was written
-	writeDue   bool                            // Pending cache write flag
-	writeDueAt time.Time                       // Scheduled cache write timestamp
-	writeQueue chan bool                       // Queue to trigger async writes
-	writing    bool                            // Flag to prevent concurrent writes
-	stateMu    sync.RWMutex                    // Guards Clients and Workspaces maps
-	writeMu    sync.Mutex                      // Guards deferred write state
-	writeTimer *time.Timer                     // Timer to flush deferred writes
+	Clients     map[xproto.Window]*store.Client // List of tracked clients
+	Workspaces  map[store.Location]*Workspace   // List of workspaces per location
+	Channels    *Channels                       // Helper for channel communication
+	Handlers    *Handlers                       // Helper for event handlers
+	lastWrite   time.Time                       // Last time cache was written
+	writeDue    bool                            // Pending cache write flag
+	writeDueAt  time.Time                       // Scheduled cache write timestamp
+	writeQueue  chan writeRequest               // Queue to trigger async writes
+	writeExecMu sync.Mutex                      // Serializes write execution
+	stateMu     sync.RWMutex                    // Guards Clients and Workspaces maps
+	writeMu     sync.Mutex                      // Guards deferred write state
+	writeTimer  *time.Timer                     // Timer to flush deferred writes
 }
 type Channels struct {
 	Event  chan string // Channel for events
@@ -84,7 +88,7 @@ func CreateTracker() *Tracker {
 			SwapClient:   &Handler{},
 			SwapScreen:   &Handler{},
 		},
-		writeQueue: make(chan bool, 1),
+		writeQueue: make(chan writeRequest, 1),
 	}
 
 	// Start background writer
@@ -128,8 +132,9 @@ func (tr *Tracker) Update() {
 			if existing != nil && existing.Latest != nil && existing.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
 				existing.Update()
 				updated++
+			} else {
+				skipped++
 			}
-			skipped++
 		}
 	}
 
@@ -177,28 +182,32 @@ func (tr *Tracker) Reset() {
 }
 
 func (tr *Tracker) backgroundWriter() {
-	for range tr.writeQueue {
+	for req := range tr.writeQueue {
 		tr.doWrite()
+		if req.done != nil {
+			close(req.done)
+		}
 	}
 }
 
 func (tr *Tracker) Write() {
-	// Enqueue write request (non-blocking)
-	select {
-	case tr.writeQueue <- true:
-		log.Debug("tracker.write.enqueued")
-	default:
-		log.Trace("tracker.write.already-queued")
+	tr.enqueueWrite(false)
+}
+
+func (tr *Tracker) Flush() {
+	tr.writeMu.Lock()
+	if tr.writeTimer != nil {
+		tr.writeTimer.Stop()
+		tr.writeTimer = nil
 	}
+	tr.writeMu.Unlock()
+
+	tr.enqueueWrite(true)
 }
 
 func (tr *Tracker) doWrite() {
-	if tr.writing {
-		log.Trace("tracker.write.skip-concurrent")
-		return
-	}
-	tr.writing = true
-	defer func() { tr.writing = false }()
+	tr.writeExecMu.Lock()
+	defer tr.writeExecMu.Unlock()
 
 	start := time.Now()
 
@@ -260,6 +269,22 @@ func (tr *Tracker) doWrite() {
 
 	// Communicate windows change
 	tr.Channels.Event <- "windows_change"
+}
+
+func (tr *Tracker) enqueueWrite(wait bool) {
+	req := writeRequest{}
+	if wait {
+		req.done = make(chan struct{})
+		tr.writeQueue <- req
+		<-req.done
+		return
+	}
+	select {
+	case tr.writeQueue <- req:
+		log.Debug("tracker.write.enqueued")
+	default:
+		log.Trace("tracker.write.already-queued")
+	}
 }
 
 func (tr *Tracker) Tile(ws *Workspace) {

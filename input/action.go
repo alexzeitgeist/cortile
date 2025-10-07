@@ -554,7 +554,7 @@ func DecreaseProportion(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 }
 
 func Restart(tr *desktop.Tracker) bool {
-	tr.Write()
+	tr.Flush()
 
 	xevent.Detach(store.X, store.X.RootWin())
 
@@ -578,7 +578,7 @@ func Restart(tr *desktop.Tracker) bool {
 }
 
 func Exit(tr *desktop.Tracker) bool {
-	tr.Write()
+	tr.Flush()
 
 	xevent.Detach(store.X, store.X.RootWin())
 
