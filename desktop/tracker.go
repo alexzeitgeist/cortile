@@ -28,6 +28,7 @@ type Tracker struct {
 	writeDueAt time.Time                       // Scheduled cache write timestamp
 	writeQueue chan bool                       // Queue to trigger async writes
 	writing    bool                            // Flag to prevent concurrent writes
+	stateMu    sync.RWMutex                    // Guards Clients and Workspaces maps
 	writeMu    sync.Mutex                      // Guards deferred write state
 	writeTimer *time.Timer                     // Timer to flush deferred writes
 }
@@ -102,7 +103,8 @@ func (tr *Tracker) Update() {
 	if ws.TilingDisabled() {
 		return
 	}
-	log.Debug("Update trackable clients [", len(tr.Clients), "/", len(store.Windows.Stacked), "]")
+	tracked := tr.snapshotClients()
+	log.Debug("Update trackable clients [", len(tracked), "/", len(store.Windows.Stacked), "]")
 
 	added := 0
 	updated := 0
@@ -117,17 +119,15 @@ func (tr *Tracker) Update() {
 
 	// Remove untrackable windows and update tracked ones
 	removed := 0
-	for w := range tr.Clients {
+	for w, existing := range tracked {
 		if !trackable[w] {
 			tr.untrackWindow(w)
 			removed++
 		} else {
 			// Only update clients on the current desktop to avoid unnecessary X11 calls
-			if c := tr.Clients[w]; c != nil {
-				if c.Latest != nil && c.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
-					c.Update()
-					updated++
-				}
+			if existing != nil && existing.Latest != nil && existing.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
+				existing.Update()
+				updated++
 			}
 			skipped++
 		}
@@ -147,7 +147,7 @@ func (tr *Tracker) Update() {
 
 	log.WithFields(log.Fields{
 		"currentDesk": store.Workplace.CurrentDesktop,
-		"tracked":     len(tr.Clients),
+		"tracked":     len(tracked),
 		"windows":     len(store.Windows.Stacked),
 		"added":       added,
 		"updated":     updated,
@@ -159,15 +159,18 @@ func (tr *Tracker) Update() {
 }
 
 func (tr *Tracker) Reset() {
-	log.Debug("Reset trackable clients [", len(tr.Clients), "/", len(store.Windows.Stacked), "]")
+	tracked := tr.snapshotClients()
+	log.Debug("Reset trackable clients [", len(tracked), "/", len(store.Windows.Stacked), "]")
 
 	// Reset client list
-	for w := range tr.Clients {
+	for w := range tracked {
 		tr.untrackWindow(w)
 	}
 
 	// Reset workspaces
+	tr.stateMu.Lock()
 	tr.Workspaces = CreateWorkspaces()
+	tr.stateMu.Unlock()
 
 	// Communicate workplace change
 	tr.Channels.Event <- "workplace_change"
@@ -208,42 +211,45 @@ func (tr *Tracker) doWrite() {
 	tr.writeMu.Unlock()
 
 	// Count dirty items before writing
+	clients := tr.snapshotClientList()
+	workspaces := tr.snapshotWorkspaceList()
+
 	clientsDirty := 0
-	for _, c := range tr.Clients {
+	for _, c := range clients {
 		if c.IsDirty() {
 			clientsDirty++
 		}
 	}
 	workspacesDirty := 0
-	for _, ws := range tr.Workspaces {
+	for _, ws := range workspaces {
 		if ws.IsDirty() {
 			workspacesDirty++
 		}
 	}
 
 	log.WithFields(log.Fields{
-		"clients":         len(tr.Clients),
+		"clients":         len(clients),
 		"clientsDirty":    clientsDirty,
-		"workspaces":      len(tr.Workspaces),
+		"workspaces":      len(workspaces),
 		"workspacesDirty": workspacesDirty,
 		"desk":            store.Workplace.CurrentDesktop,
 	}).Debug("tracker.write.start")
 
 	// Write client cache (only dirty clients)
-	for _, c := range tr.Clients {
+	for _, c := range clients {
 		c.Write()
 	}
 
 	// Write workspace cache (only dirty workspaces)
-	for _, ws := range tr.Workspaces {
+	for _, ws := range workspaces {
 		ws.Write()
 	}
 
 	elapsed := time.Since(start)
 	log.WithFields(log.Fields{
-		"clients":           len(tr.Clients),
+		"clients":           len(clients),
 		"clientsWritten":    clientsDirty,
-		"workspaces":        len(tr.Workspaces),
+		"workspaces":        len(workspaces),
 		"workspacesWritten": workspacesDirty,
 		"elapsed":           elapsed,
 	}).Debug("tracker.write.complete")
@@ -301,7 +307,9 @@ func (tr *Tracker) WorkspaceAt(desktop uint, screen uint) *Workspace {
 	location := store.Location{Desktop: desktop, Screen: screen}
 
 	// Validate workspace
+	tr.stateMu.RLock()
 	ws := tr.Workspaces[location]
+	tr.stateMu.RUnlock()
 	if ws == nil {
 		log.Warn("Invalid workspace [workspace-", location.Desktop, "-", location.Screen, "]")
 	}
@@ -327,14 +335,60 @@ func (tr *Tracker) ClientAt(ws *Workspace, p common.Point) *store.Client {
 	return nil
 }
 
-func (tr *Tracker) ActiveClient() *store.Client {
-	c, exists := tr.Clients[store.Windows.Active.Id]
+func (tr *Tracker) clientByWindow(id xproto.Window) (*store.Client, bool) {
+	tr.stateMu.RLock()
+	defer tr.stateMu.RUnlock()
+	c, ok := tr.Clients[id]
+	return c, ok
+}
 
-	// Validate client
+func (tr *Tracker) snapshotClients() map[xproto.Window]*store.Client {
+	tr.stateMu.RLock()
+	defer tr.stateMu.RUnlock()
+	snapshot := make(map[xproto.Window]*store.Client, len(tr.Clients))
+	for id, client := range tr.Clients {
+		snapshot[id] = client
+	}
+	return snapshot
+}
+
+func (tr *Tracker) snapshotClientList() []*store.Client {
+	tr.stateMu.RLock()
+	defer tr.stateMu.RUnlock()
+	clients := make([]*store.Client, 0, len(tr.Clients))
+	for _, c := range tr.Clients {
+		clients = append(clients, c)
+	}
+	return clients
+}
+
+func (tr *Tracker) snapshotWorkspaceList() []*Workspace {
+	tr.stateMu.RLock()
+	defer tr.stateMu.RUnlock()
+	workspaces := make([]*Workspace, 0, len(tr.Workspaces))
+	for _, ws := range tr.Workspaces {
+		workspaces = append(workspaces, ws)
+	}
+	return workspaces
+}
+
+func (tr *Tracker) clientCount() int {
+	tr.stateMu.RLock()
+	defer tr.stateMu.RUnlock()
+	return len(tr.Clients)
+}
+
+func (tr *Tracker) workspaceCount() int {
+	tr.stateMu.RLock()
+	defer tr.stateMu.RUnlock()
+	return len(tr.Workspaces)
+}
+
+func (tr *Tracker) ActiveClient() *store.Client {
+	c, exists := tr.clientByWindow(store.Windows.Active.Id)
 	if !exists {
 		return nil
 	}
-
 	return c
 }
 
@@ -367,7 +421,13 @@ func (tr *Tracker) trackWindow(w xproto.Window) bool {
 	}
 
 	// Add new client
+	tr.stateMu.Lock()
+	if _, exists := tr.Clients[c.Window.Id]; exists {
+		tr.stateMu.Unlock()
+		return false
+	}
 	tr.Clients[c.Window.Id] = c
+	tr.stateMu.Unlock()
 	ws.AddClient(c)
 
 	// Attach handlers
@@ -382,8 +442,15 @@ func (tr *Tracker) untrackWindow(w xproto.Window) bool {
 		return false
 	}
 
-	// Client and workspace
-	c := tr.Clients[w]
+	tr.stateMu.Lock()
+	c, exists := tr.Clients[w]
+	if !exists {
+		tr.stateMu.Unlock()
+		return false
+	}
+	delete(tr.Clients, w)
+	tr.stateMu.Unlock()
+
 	ws := tr.ClientWorkspace(c)
 	if ws == nil {
 		return false
@@ -397,7 +464,6 @@ func (tr *Tracker) untrackWindow(w xproto.Window) bool {
 
 	// Remove client
 	ws.RemoveClient(c)
-	delete(tr.Clients, w)
 
 	// Tile workspace
 	tr.Tile(ws)
@@ -646,7 +712,7 @@ func (tr *Tracker) handleWorkspaceChange(h *Handler) {
 
 func (tr *Tracker) onStateUpdate(state string, desktop uint, screen uint) {
 	start := time.Now()
-	workplaceChanged := store.Workplace.DesktopCount*store.Workplace.ScreenCount != uint(len(tr.Workspaces))
+	workplaceChanged := store.Workplace.DesktopCount*store.Workplace.ScreenCount != uint(tr.workspaceCount())
 	workspaceChanged := common.IsInList(state, []string{"_NET_CURRENT_DESKTOP"})
 
 	viewportChanged := common.IsInList(state, []string{"_NET_NUMBER_OF_DESKTOPS", "_NET_DESKTOP_LAYOUT", "_NET_DESKTOP_GEOMETRY", "_NET_DESKTOP_VIEWPORT", "_NET_WORKAREA"})
@@ -663,7 +729,7 @@ func (tr *Tracker) onStateUpdate(state string, desktop uint, screen uint) {
 	if workspaceChanged {
 
 		// Update sticky windows
-		for _, c := range tr.Clients {
+		for _, c := range tr.snapshotClientList() {
 			if store.IsSticky(c.Latest) && c.Latest.Location.Desktop != store.Workplace.CurrentDesktop {
 				c.MoveToDesktop(^uint32(0))
 			}
@@ -772,7 +838,9 @@ func (tr *Tracker) attachHandlers(c *store.Client) {
 }
 
 func (tr *Tracker) isTracked(w xproto.Window) bool {
+	tr.stateMu.RLock()
 	_, ok := tr.Clients[w]
+	tr.stateMu.RUnlock()
 	return ok
 }
 
