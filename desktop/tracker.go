@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"sync"
 	"time"
 
 	"github.com/jezek/xgb/xproto"
@@ -27,6 +28,8 @@ type Tracker struct {
 	writeDueAt time.Time                       // Scheduled cache write timestamp
 	writeQueue chan bool                       // Queue to trigger async writes
 	writing    bool                            // Flag to prevent concurrent writes
+	writeMu    sync.Mutex                      // Guards deferred write state
+	writeTimer *time.Timer                     // Timer to flush deferred writes
 }
 type Channels struct {
 	Event  chan string // Channel for events
@@ -196,6 +199,14 @@ func (tr *Tracker) doWrite() {
 
 	start := time.Now()
 
+	tr.writeMu.Lock()
+	tr.writeDue = false
+	if tr.writeTimer != nil {
+		tr.writeTimer.Stop()
+		tr.writeTimer = nil
+	}
+	tr.writeMu.Unlock()
+
 	// Count dirty items before writing
 	clientsDirty := 0
 	for _, c := range tr.Clients {
@@ -218,8 +229,6 @@ func (tr *Tracker) doWrite() {
 		"desk":            store.Workplace.CurrentDesktop,
 	}).Debug("tracker.write.start")
 
-	tr.writeDue = false
-
 	// Write client cache (only dirty clients)
 	for _, c := range tr.Clients {
 		c.Write()
@@ -238,6 +247,10 @@ func (tr *Tracker) doWrite() {
 		"workspacesWritten": workspacesDirty,
 		"elapsed":           elapsed,
 	}).Debug("tracker.write.complete")
+
+	tr.writeMu.Lock()
+	tr.lastWrite = time.Now()
+	tr.writeMu.Unlock()
 
 	// Communicate windows change
 	tr.Channels.Event <- "windows_change"
@@ -781,25 +794,64 @@ func (tr *Tracker) isTrackableInfo(info *store.Info) bool {
 
 func (tr *Tracker) scheduleWrite() {
 	deadline := time.Now().Add(writeDebounce)
+	tr.writeMu.Lock()
 	if !tr.writeDue || deadline.Before(tr.writeDueAt) {
 		tr.writeDueAt = deadline
 	}
 	tr.writeDue = true
+
+	delay := time.Until(tr.writeDueAt)
+	if delay < 0 {
+		delay = 0
+	}
+	if tr.writeTimer != nil {
+		tr.writeTimer.Stop()
+	}
+	tr.writeTimer = time.AfterFunc(delay, tr.flushScheduledWrite)
+	scheduledAt := tr.writeDueAt
+	tr.writeMu.Unlock()
+
 	log.WithFields(log.Fields{
-		"deadline": tr.writeDueAt,
+		"deadline": scheduledAt,
 	}).Trace("tracker.write.scheduled")
 }
 
 func (tr *Tracker) maybeWrite() {
+	tr.writeMu.Lock()
 	if !tr.writeDue {
+		tr.writeMu.Unlock()
 		return
 	}
 	remaining := time.Until(tr.writeDueAt)
+	tr.writeMu.Unlock()
 	if remaining > 0 {
 		log.WithField("remaining", remaining).Trace("tracker.write.debounce")
 		return
 	}
+	tr.flushScheduledWrite()
+}
+
+func (tr *Tracker) flushScheduledWrite() {
+	tr.writeMu.Lock()
+	if !tr.writeDue {
+		if tr.writeTimer != nil {
+			tr.writeTimer.Stop()
+			tr.writeTimer = nil
+		}
+		tr.writeMu.Unlock()
+		return
+	}
+	remaining := time.Until(tr.writeDueAt)
+	if remaining > 0 {
+		if tr.writeTimer != nil {
+			tr.writeTimer.Stop()
+		}
+		tr.writeTimer = time.AfterFunc(remaining, tr.flushScheduledWrite)
+		tr.writeMu.Unlock()
+		return
+	}
+	tr.writeTimer = nil
+	tr.writeMu.Unlock()
+
 	tr.Write()
-	tr.lastWrite = time.Now()
-	tr.writeDue = false
 }
