@@ -313,6 +313,7 @@ func (ws *Workspace) Write() {
 		return
 	}
 
+	cache := ws.Cache()
 	ws.mu.Lock()
 	if !ws.dirty {
 		ws.mu.Unlock()
@@ -357,9 +358,17 @@ func (ws *Workspace) Write() {
 			Decoration: mgData.Decoration,
 		}
 	}
+	ws.dirty = false
 	ws.mu.Unlock()
 
-	cache := ws.Cache()
+	writeFailed := true
+	defer func() {
+		if writeFailed {
+			ws.mu.Lock()
+			ws.dirty = true
+			ws.mu.Unlock()
+		}
+	}()
 
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -409,12 +418,9 @@ func (ws *Workspace) Write() {
 		return
 	}
 	cleanup = nil
+	writeFailed = false
 
-	ws.mu.Lock()
-	ws.dirty = false
-	ws.mu.Unlock()
-
-	log.Trace("Write workspace cache data ", cache.Name, " [", ws.Name, "]")
+	log.Trace("Write workspace cache data ", cache.Name, " [", snapshot.Name, "]")
 }
 
 func (ws *Workspace) Read() *Workspace {
