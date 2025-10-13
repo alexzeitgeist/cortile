@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"encoding/json"
@@ -33,7 +34,8 @@ type Client struct {
 	Original *Info     `json:"-"` // Original client window information
 	Cached   *Info     `json:"-"` // Cached client window information
 	Latest   *Info     // Latest client window information
-	dirty    bool      // Internal flag for cache write optimization
+	mu       sync.Mutex
+	dirty    bool // Internal flag for cache write optimization
 }
 
 type Info struct {
@@ -104,11 +106,27 @@ func (c *Client) UnLock() {
 }
 
 func (c *Client) MarkDirty() {
+	c.mu.Lock()
 	c.dirty = true
+	c.mu.Unlock()
 }
 
 func (c *Client) IsDirty() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.dirty
+}
+
+func (c *Client) GetHidden() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Hidden
+}
+
+func (c *Client) SetHidden(hidden bool) {
+	c.mu.Lock()
+	c.Hidden = hidden
+	c.mu.Unlock()
 }
 
 // filterPersistentStates returns only states that matter for cache persistence.
@@ -386,17 +404,19 @@ func (c *Client) Update() {
 	oldInfo := c.Latest
 	if oldInfo != nil {
 		geomChanged := !reflect.DeepEqual(info.Dimensions.Geometry, oldInfo.Dimensions.Geometry)
-		
+
 		// Only compare persistent states that matter for cache restoration
 		oldPersistentStates := filterPersistentStates(oldInfo.States)
 		newPersistentStates := filterPersistentStates(info.States)
 		statesChanged := !reflect.DeepEqual(newPersistentStates, oldPersistentStates)
-		
+
 		locationChanged := info.Location.Desktop != oldInfo.Location.Desktop ||
 			info.Location.Screen != oldInfo.Location.Screen
 
 		if geomChanged || statesChanged || locationChanged {
+			c.mu.Lock()
 			c.dirty = true
+			c.mu.Unlock()
 			log.WithFields(log.Fields{
 				"class": info.Class,
 				"geom":  geomChanged,
@@ -415,11 +435,13 @@ func (c *Client) Write() {
 		return
 	}
 
-	// Skip write if not dirty
+	c.mu.Lock()
 	if !c.dirty {
+		c.mu.Unlock()
 		log.Trace("Skip clean client cache write [", c.Latest.Class, "]")
 		return
 	}
+	c.mu.Unlock()
 
 	start := time.Now()
 
@@ -481,8 +503,9 @@ func (c *Client) Write() {
 	}
 	cleanup = nil
 
-	// Clear dirty flag after successful write
+	c.mu.Lock()
 	c.dirty = false
+	c.mu.Unlock()
 
 	elapsed := time.Since(start)
 	log.WithFields(log.Fields{

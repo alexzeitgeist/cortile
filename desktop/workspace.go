@@ -3,6 +3,7 @@ package desktop
 import (
 	"fmt"
 	"os"
+	"sync"
 
 	"encoding/json"
 	"path/filepath"
@@ -20,7 +21,8 @@ type Workspace struct {
 	Layouts  []Layout       // List of available layouts
 	Layout   uint           // Active layout index
 	Tiling   bool           // Tiling is enabled
-	dirty    bool           // Internal flag for cache write optimization
+	mu       sync.Mutex
+	dirty    bool // Internal flag for cache write optimization
 }
 
 func CreateWorkspaces() map[store.Location]*Workspace {
@@ -86,12 +88,16 @@ func CreateLayouts(loc store.Location) []Layout {
 
 func (ws *Workspace) EnableTiling() {
 	ws.Tiling = true
+	ws.mu.Lock()
 	ws.dirty = true
+	ws.mu.Unlock()
 }
 
 func (ws *Workspace) DisableTiling() {
 	ws.Tiling = false
+	ws.mu.Lock()
 	ws.dirty = true
+	ws.mu.Unlock()
 }
 
 func (ws *Workspace) TilingEnabled() bool {
@@ -114,14 +120,20 @@ func (ws *Workspace) ActiveLayout() Layout {
 
 func (ws *Workspace) SetLayout(layout uint) {
 	ws.Layout = layout
+	ws.mu.Lock()
 	ws.dirty = true
+	ws.mu.Unlock()
 }
 
 func (ws *Workspace) MarkDirty() {
+	ws.mu.Lock()
 	ws.dirty = true
+	ws.mu.Unlock()
 }
 
 func (ws *Workspace) IsDirty() bool {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
 	return ws.dirty
 }
 
@@ -188,8 +200,9 @@ func (ws *Workspace) AddClient(c *store.Client) {
 		l.AddClient(c)
 	}
 
-	// Mark workspace and client dirty
+	ws.mu.Lock()
 	ws.dirty = true
+	ws.mu.Unlock()
 	c.MarkDirty()
 }
 
@@ -207,8 +220,9 @@ func (ws *Workspace) RemoveClient(c *store.Client) {
 		l.RemoveClient(c)
 	}
 
-	// Mark workspace and client dirty
+	ws.mu.Lock()
 	ws.dirty = true
+	ws.mu.Unlock()
 	c.MarkDirty()
 }
 
@@ -272,11 +286,13 @@ func (ws *Workspace) Write() {
 		return
 	}
 
-	// Skip write if not dirty
+	ws.mu.Lock()
 	if !ws.dirty {
+		ws.mu.Unlock()
 		log.Trace("Skip clean workspace cache write [", ws.Name, "]")
 		return
 	}
+	ws.mu.Unlock()
 
 	// Obtain cache object
 	cache := ws.Cache()
@@ -331,8 +347,9 @@ func (ws *Workspace) Write() {
 	}
 	cleanup = nil
 
-	// Clear dirty flag after successful write
+	ws.mu.Lock()
 	ws.dirty = false
+	ws.mu.Unlock()
 
 	log.Trace("Write workspace cache data ", cache.Name, " [", ws.Name, "]")
 }
