@@ -73,6 +73,20 @@ type Hints struct {
 	Motif  motif.Hints       // Client window decoration hints
 }
 
+func cloneInfo(src *Info) *Info {
+	if src == nil {
+		return nil
+	}
+	copy := *src
+	if len(src.Types) > 0 {
+		copy.Types = append([]string(nil), src.Types...)
+	}
+	if len(src.States) > 0 {
+		copy.States = append([]string(nil), src.States...)
+	}
+	return &copy
+}
+
 const (
 	Original uint8 = 1 // Flag to restore original info
 	Cached   uint8 = 2 // Flag to restore cached info
@@ -147,9 +161,9 @@ func filterPersistentStates(states []string) []string {
 			"_NET_WM_STATE_ABOVE",
 			"_NET_WM_STATE_BELOW":
 			persistent = append(persistent, state)
-		// Skip transient states like:
-		// - _NET_WM_STATE_FOCUSED (changes with every focus)
-		// - _NET_WM_STATE_DEMANDS_ATTENTION (temporary notification state)
+			// Skip transient states like:
+			// - _NET_WM_STATE_FOCUSED (changes with every focus)
+			// - _NET_WM_STATE_DEMANDS_ATTENTION (temporary notification state)
 		}
 	}
 	return persistent
@@ -419,15 +433,6 @@ func (c *Client) Write() {
 		return
 	}
 
-	c.mu.Lock()
-	if !c.dirty {
-		c.mu.Unlock()
-		latest := c.GetLatest()
-		log.Trace("Skip clean client cache write [", latest.Class, "]")
-		return
-	}
-	c.mu.Unlock()
-
 	start := time.Now()
 
 	// Create serialization snapshot under lock protection
@@ -438,18 +443,33 @@ func (c *Client) Write() {
 		Latest  *Info
 	}
 
+	var latest *Info
+	snapshot := &SerializableClient{}
 	c.mu.Lock()
-	c.latestMu.RLock()
-	snapshot := &SerializableClient{
-		Window:  c.Window,
-		Created: c.Created,
-		Locked:  c.Locked,
-		Latest:  c.Latest,
+	if !c.dirty {
+		c.mu.Unlock()
+		latest = c.GetLatest()
+		log.Trace("Skip clean client cache write [", latest.Class, "]")
+		return
 	}
+	snapshot.Window = c.Window
+	snapshot.Created = c.Created
+	snapshot.Locked = c.Locked
+	c.latestMu.RLock()
+	snapshot.Latest = cloneInfo(c.Latest)
 	c.latestMu.RUnlock()
+	c.dirty = false
 	c.mu.Unlock()
 
-	latest := snapshot.Latest
+	latest = snapshot.Latest
+	writeFailed := true
+	defer func() {
+		if writeFailed {
+			c.mu.Lock()
+			c.dirty = true
+			c.mu.Unlock()
+		}
+	}()
 	cache := c.Cache()
 	log.WithFields(log.Fields{
 		"client": latest.Class,
@@ -504,10 +524,7 @@ func (c *Client) Write() {
 		return
 	}
 	cleanup = nil
-
-	c.mu.Lock()
-	c.dirty = false
-	c.mu.Unlock()
+	writeFailed = false
 
 	elapsed := time.Since(start)
 	log.WithFields(log.Fields{
