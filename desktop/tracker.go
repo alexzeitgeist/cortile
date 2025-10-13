@@ -601,7 +601,8 @@ func (tr *Tracker) handleResizeClient(c *store.Client) {
 				Left:   cx != px,
 			}
 			ws.ActiveLayout().UpdateProportions(c, dir)
-			ws.MarkDirty() // Mark workspace dirty after proportion changes
+			ws.MarkDirty()
+			tr.ScheduleWrite()
 		}
 
 		// Tile workspace
@@ -679,6 +680,7 @@ func (tr *Tracker) handleSwapClient(h *Handler) {
 	ws.MarkDirty()
 	c.MarkDirty()
 	target.MarkDirty()
+	tr.ScheduleWrite()
 
 	// Reset client swapping handler
 	h.Reset()
@@ -722,6 +724,7 @@ func (tr *Tracker) handleWorkspaceChange(h *Handler) {
 		mg.MakeMaster(c)
 		ws.MarkDirty()
 		c.MarkDirty()
+		tr.ScheduleWrite()
 	}
 
 	// Tile new workspace
@@ -775,7 +778,7 @@ func (tr *Tracker) onStateUpdate(state string, desktop uint, screen uint) {
 
 	// Persist cache only when topology really changed
 	if workplaceChanged || clientListChanged {
-		tr.scheduleWrite()
+		tr.ScheduleWrite()
 	}
 
 	tr.maybeWrite()
@@ -885,7 +888,7 @@ func (tr *Tracker) isTrackableInfo(info *store.Info) bool {
 	return !store.IsSpecial(info) && !store.IsIgnored(info)
 }
 
-func (tr *Tracker) scheduleWrite() {
+func (tr *Tracker) ScheduleWrite() {
 	deadline := time.Now().Add(writeDebounce)
 	tr.writeMu.Lock()
 	if !tr.writeDue || deadline.Before(tr.writeDueAt) {
