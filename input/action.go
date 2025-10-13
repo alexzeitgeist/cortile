@@ -150,6 +150,7 @@ func EnableTiling(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 	ws.EnableTiling()
 	tr.Update()
 	tr.Tile(ws)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)
@@ -163,6 +164,7 @@ func DisableTiling(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 	}
 	ws.DisableTiling()
 	tr.Restore(ws, store.Latest)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)
@@ -227,6 +229,7 @@ func Restore(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 	}
 	ws.DisableTiling()
 	tr.Restore(ws, store.Original)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)
@@ -255,6 +258,7 @@ func CycleNext(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 	}
 	ws.CycleLayout(1)
 	tr.Tile(ws)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)
@@ -268,6 +272,7 @@ func CyclePrevious(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 	}
 	ws.CycleLayout(-1)
 	tr.Tile(ws)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)
@@ -285,6 +290,7 @@ func VerticalLeftLayout(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		}
 	}
 	tr.Tile(ws)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)
@@ -302,6 +308,7 @@ func VerticalRightLayout(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		}
 	}
 	tr.Tile(ws)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)
@@ -319,6 +326,7 @@ func HorizontalTopLayout(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		}
 	}
 	tr.Tile(ws)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)
@@ -336,6 +344,7 @@ func HorizontalBottomLayout(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		}
 	}
 	tr.Tile(ws)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)
@@ -353,6 +362,7 @@ func MaximizedLayout(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		}
 	}
 	tr.Tile(ws)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)
@@ -370,6 +380,7 @@ func FullscreenLayout(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		}
 	}
 	tr.Tile(ws)
+	tr.ScheduleWrite()
 
 	ui.ShowLayout(ws)
 	ui.UpdateIcon(ws)

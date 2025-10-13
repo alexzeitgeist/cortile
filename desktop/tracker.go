@@ -473,6 +473,7 @@ func (tr *Tracker) trackWindow(w xproto.Window) bool {
 	tr.Clients[c.Window.Id] = c
 	tr.stateMu.Unlock()
 	ws.AddClient(c)
+	tr.ScheduleWrite()
 
 	// Attach handlers
 	tr.attachHandlers(c)
@@ -508,6 +509,7 @@ func (tr *Tracker) untrackWindow(w xproto.Window) bool {
 
 	// Remove client
 	ws.RemoveClient(c)
+	tr.ScheduleWrite()
 
 	// Tile workspace
 	tr.Tile(ws)
@@ -707,6 +709,7 @@ func (tr *Tracker) handleWorkspaceChange(h *Handler) {
 	mg := ws.ActiveLayout().GetManager()
 	master := mg.IsMaster(c)
 	ws.RemoveClient(c)
+	tr.ScheduleWrite()
 
 	// Tile current workspace
 	if ws.TilingEnabled() {
@@ -726,6 +729,7 @@ func (tr *Tracker) handleWorkspaceChange(h *Handler) {
 	}
 	mg = ws.ActiveLayout().GetManager()
 	ws.AddClient(c)
+	tr.ScheduleWrite()
 	if master {
 		mg.MakeMaster(c)
 		ws.MarkDirty()
