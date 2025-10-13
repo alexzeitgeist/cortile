@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/leukipp/cortile/v2/common"
 
@@ -16,6 +17,7 @@ type Manager struct {
 	Masters     *Clients     // List of master window clients
 	Slaves      *Clients     // List of slave window clients
 	Decoration  bool         // Window decoration is enabled
+	mu          sync.RWMutex // Protects all mutable fields
 }
 
 type Location struct {
@@ -47,6 +49,19 @@ const (
 	Visible uint8 = 3 // Flag for visible (top only) clients
 )
 
+// SerializableManager contains only the data needed for JSON serialization
+type SerializableManager struct {
+	Location    Location
+	Proportions struct {
+		MasterSlave  map[int][]float64
+		MasterMaster map[int][]float64
+		SlaveSlave   map[int][]float64
+	}
+	MastersMaximum int
+	SlavesMaximum  int
+	Decoration     bool
+}
+
 func CreateManager(loc Location) *Manager {
 	return &Manager{
 		Name:     fmt.Sprintf("manager-%d-%d", loc.Desktop, loc.Screen),
@@ -68,6 +83,35 @@ func CreateManager(loc Location) *Manager {
 	}
 }
 
+// GetSerializable returns a deep copy of serializable fields under lock protection
+func (mg *Manager) GetSerializable() SerializableManager {
+	mg.mu.RLock()
+	defer mg.mu.RUnlock()
+
+	snapshot := SerializableManager{
+		Location:       *mg.Location,
+		MastersMaximum: mg.Masters.Maximum,
+		SlavesMaximum:  mg.Slaves.Maximum,
+		Decoration:     mg.Decoration,
+	}
+
+	// Deep copy Proportions maps
+	snapshot.Proportions.MasterSlave = make(map[int][]float64, len(mg.Proportions.MasterSlave))
+	for k, v := range mg.Proportions.MasterSlave {
+		snapshot.Proportions.MasterSlave[k] = append([]float64(nil), v...)
+	}
+	snapshot.Proportions.MasterMaster = make(map[int][]float64, len(mg.Proportions.MasterMaster))
+	for k, v := range mg.Proportions.MasterMaster {
+		snapshot.Proportions.MasterMaster[k] = append([]float64(nil), v...)
+	}
+	snapshot.Proportions.SlaveSlave = make(map[int][]float64, len(mg.Proportions.SlaveSlave))
+	for k, v := range mg.Proportions.SlaveSlave {
+		snapshot.Proportions.SlaveSlave[k] = append([]float64(nil), v...)
+	}
+
+	return snapshot
+}
+
 func (mg *Manager) EnableDecoration() {
 	mg.Decoration = true
 }
@@ -85,7 +129,10 @@ func (mg *Manager) DecorationDisabled() bool {
 }
 
 func (mg *Manager) AddClient(c *Client) {
-	if mg.IsMaster(c) || mg.IsSlave(c) {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
+
+	if mg.isMaster(c) || mg.isSlave(c) {
 		return
 	}
 
@@ -99,13 +146,16 @@ func (mg *Manager) AddClient(c *Client) {
 }
 
 func (mg *Manager) RemoveClient(c *Client) {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
+
 	log.Debug("Remove client from manager [", c.GetLatest().Class, ", ", mg.Name, "]")
 
 	// Remove master window
-	mi := mg.Index(mg.Masters, c)
+	mi := mg.index(mg.Masters, c)
 	if mi >= 0 {
 		if len(mg.Slaves.Stacked) > 0 {
-			mg.SwapClient(mg.Masters.Stacked[mi], mg.Slaves.Stacked[0])
+			mg.swapClient(mg.Masters.Stacked[mi], mg.Slaves.Stacked[0])
 			mg.Slaves.Stacked = mg.Slaves.Stacked[1:]
 		} else {
 			mg.Masters.Stacked = removeClient(mg.Masters.Stacked, mi)
@@ -113,28 +163,38 @@ func (mg *Manager) RemoveClient(c *Client) {
 	}
 
 	// Remove slave window
-	si := mg.Index(mg.Slaves, c)
+	si := mg.index(mg.Slaves, c)
 	if si >= 0 {
 		mg.Slaves.Stacked = removeClient(mg.Slaves.Stacked, si)
 	}
 }
 
 func (mg *Manager) MakeMaster(c *Client) {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
+
 	log.Info("Make window master [", c.GetLatest().Class, ", ", mg.Name, "]")
 
 	if len(mg.Masters.Stacked) > 0 {
-		mg.SwapClient(c, mg.Masters.Stacked[0])
+		mg.swapClient(c, mg.Masters.Stacked[0])
 	}
 }
 
 func (mg *Manager) SwapClient(c1 *Client, c2 *Client) {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
+	mg.swapClient(c1, c2)
+}
+
+// swapClient is the internal version that assumes lock is held
+func (mg *Manager) swapClient(c1 *Client, c2 *Client) {
 	log.Info("Swap clients [", c1.GetLatest().Class, "-", c2.GetLatest().Class, ", ", mg.Name, "]")
 
-	mIndex1 := mg.Index(mg.Masters, c1)
-	sIndex1 := mg.Index(mg.Slaves, c1)
+	mIndex1 := mg.index(mg.Masters, c1)
+	sIndex1 := mg.index(mg.Slaves, c1)
 
-	mIndex2 := mg.Index(mg.Masters, c2)
-	sIndex2 := mg.Index(mg.Slaves, c2)
+	mIndex2 := mg.index(mg.Masters, c2)
+	sIndex2 := mg.index(mg.Slaves, c2)
 
 	// Swap master with master
 	if mIndex1 >= 0 && mIndex2 >= 0 {
@@ -223,6 +283,8 @@ func (mg *Manager) PreviousClient() *Client {
 }
 
 func (mg *Manager) IncreaseMaster() {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
 
 	// Increase master area
 	if len(mg.Slaves.Stacked) > 1 && mg.Masters.Maximum < common.Config.WindowMastersMax {
@@ -235,6 +297,8 @@ func (mg *Manager) IncreaseMaster() {
 }
 
 func (mg *Manager) DecreaseMaster() {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
 
 	// Decrease master area
 	if len(mg.Masters.Stacked) > 0 {
@@ -247,6 +311,8 @@ func (mg *Manager) DecreaseMaster() {
 }
 
 func (mg *Manager) IncreaseSlave() {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
 
 	// Increase slave area
 	if mg.Slaves.Maximum < common.Config.WindowSlavesMax {
@@ -257,6 +323,8 @@ func (mg *Manager) IncreaseSlave() {
 }
 
 func (mg *Manager) DecreaseSlave() {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
 
 	// Decrease slave area
 	if mg.Slaves.Maximum > 1 {
@@ -283,6 +351,8 @@ func (mg *Manager) DecreaseProportion() {
 }
 
 func (mg *Manager) SetProportions(ps []float64, pi float64, i int, j int) bool {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
 
 	// Ignore changes on border sides
 	if i == j || i < 0 || i >= len(ps) || j < 0 || j >= len(ps) {
@@ -310,26 +380,40 @@ func (mg *Manager) SetProportions(ps []float64, pi float64, i int, j int) bool {
 }
 
 func (mg *Manager) IsMaster(c *Client) bool {
-
-	// Check if window is master
-	return mg.Index(mg.Masters, c) >= 0
+	mg.mu.RLock()
+	defer mg.mu.RUnlock()
+	return mg.isMaster(c)
 }
 
 func (mg *Manager) IsSlave(c *Client) bool {
-
-	// Check if window is slave
-	return mg.Index(mg.Slaves, c) >= 0
+	mg.mu.RLock()
+	defer mg.mu.RUnlock()
+	return mg.isSlave(c)
 }
 
 func (mg *Manager) Index(windows *Clients, c *Client) int {
+	mg.mu.RLock()
+	defer mg.mu.RUnlock()
+	return mg.index(windows, c)
+}
 
-	// Traverse client list
+// isMaster is internal version that assumes lock is held
+func (mg *Manager) isMaster(c *Client) bool {
+	return mg.index(mg.Masters, c) >= 0
+}
+
+// isSlave is internal version that assumes lock is held
+func (mg *Manager) isSlave(c *Client) bool {
+	return mg.index(mg.Slaves, c) >= 0
+}
+
+// index is internal version that assumes lock is held
+func (mg *Manager) index(windows *Clients, c *Client) int {
 	for i, m := range windows.Stacked {
 		if m.Window.Id == c.Window.Id {
 			return i
 		}
 	}
-
 	return -1
 }
 
@@ -361,9 +445,15 @@ func (mg *Manager) Visible(windows *Clients) []*Client {
 }
 
 func (mg *Manager) Clients(flag uint8) []*Client {
+	mg.mu.RLock()
+	defer mg.mu.RUnlock()
+
 	switch flag {
 	case Stacked:
-		return append(mg.Masters.Stacked, mg.Slaves.Stacked...)
+		result := make([]*Client, len(mg.Masters.Stacked)+len(mg.Slaves.Stacked))
+		copy(result, mg.Masters.Stacked)
+		copy(result[len(mg.Masters.Stacked):], mg.Slaves.Stacked)
+		return result
 	case Ordered:
 		return append(mg.Ordered(mg.Masters), mg.Ordered(mg.Slaves)...)
 	case Visible:

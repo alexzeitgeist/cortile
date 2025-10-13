@@ -281,6 +281,33 @@ func (ws *Workspace) Restore(flag uint8) {
 	}
 }
 
+// SerializableLayout contains only the data needed for JSON serialization
+type SerializableLayout struct {
+	Name        string
+	Location    store.Location
+	Proportions struct {
+		MasterSlave  map[int][]float64
+		MasterMaster map[int][]float64
+		SlaveSlave   map[int][]float64
+	}
+	Masters struct {
+		Maximum int
+	}
+	Slaves struct {
+		Maximum int
+	}
+	Decoration bool
+}
+
+// SerializableWorkspace contains only the data needed for JSON serialization
+type SerializableWorkspace struct {
+	Name     string
+	Location store.Location
+	Layouts  []SerializableLayout
+	Layout   uint
+	Tiling   bool
+}
+
 func (ws *Workspace) Write() {
 	if common.CacheDisabled() {
 		return
@@ -292,13 +319,49 @@ func (ws *Workspace) Write() {
 		log.Trace("Skip clean workspace cache write [", ws.Name, "]")
 		return
 	}
+
+	// Create serializable snapshot with deep copies of all data
+	snapshot := SerializableWorkspace{
+		Name:     ws.Name,
+		Location: ws.Location,
+		Layout:   ws.Layout,
+		Tiling:   ws.Tiling,
+		Layouts:  make([]SerializableLayout, len(ws.Layouts)),
+	}
+
+	for i, l := range ws.Layouts {
+		mgData := l.GetManager().GetSerializable()
+
+		snapshot.Layouts[i] = SerializableLayout{
+			Name:     l.GetName(),
+			Location: mgData.Location,
+			Proportions: struct {
+				MasterSlave  map[int][]float64
+				MasterMaster map[int][]float64
+				SlaveSlave   map[int][]float64
+			}{
+				MasterSlave:  mgData.Proportions.MasterSlave,
+				MasterMaster: mgData.Proportions.MasterMaster,
+				SlaveSlave:   mgData.Proportions.SlaveSlave,
+			},
+			Masters: struct {
+				Maximum int
+			}{
+				Maximum: mgData.MastersMaximum,
+			},
+			Slaves: struct {
+				Maximum int
+			}{
+				Maximum: mgData.SlavesMaximum,
+			},
+			Decoration: mgData.Decoration,
+		}
+	}
 	ws.mu.Unlock()
 
-	// Obtain cache object
 	cache := ws.Cache()
 
-	// Parse workspace cache
-	data, err := json.MarshalIndent(cache.Data, "", "  ")
+	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		log.Warn("Error parsing workspace cache [", ws.Name, "]")
 		return

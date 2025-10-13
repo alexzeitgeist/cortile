@@ -430,15 +430,34 @@ func (c *Client) Write() {
 
 	start := time.Now()
 
+	// Create serialization snapshot under lock protection
+	type SerializableClient struct {
+		Window  *XWindow
+		Created time.Time
+		Locked  bool
+		Latest  *Info
+	}
+
+	c.mu.Lock()
+	c.latestMu.RLock()
+	snapshot := &SerializableClient{
+		Window:  c.Window,
+		Created: c.Created,
+		Locked:  c.Locked,
+		Latest:  c.Latest,
+	}
+	c.latestMu.RUnlock()
+	c.mu.Unlock()
+
+	latest := snapshot.Latest
 	cache := c.Cache()
-	latest := c.GetLatest()
 	log.WithFields(log.Fields{
 		"client": latest.Class,
 		"desk":   latest.Location.Desktop,
 		"path":   cache.Name,
 	}).Debug("client.cache.write.start")
 
-	data, err := json.MarshalIndent(cache.Data, "", "  ")
+	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		log.Warn("Error parsing client cache [", latest.Class, "]")
 		return
