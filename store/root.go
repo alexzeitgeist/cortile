@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jezek/xgb/randr"
@@ -28,7 +29,8 @@ var (
 	Pointer            *XPointer       // X pointer
 	Windows            *XWindows       // X windows
 	displaysCache      XDisplays       // Cached display configuration
-	displaysCacheValid bool            // Whether the cache is valid
+	displaysCacheValid atomic.Bool     // Whether the cache is valid
+	displaysCacheTime  atomic.Int64    // When the cache was last set (Unix nanos)
 )
 
 type XWindowManager struct {
@@ -151,6 +153,9 @@ func InitRoot() {
 	root := CreateXWindow(X.RootWin())
 	root.Instance.Listen(xproto.EventMaskSubstructureNotify | xproto.EventMaskPropertyChange)
 	xevent.PropertyNotifyFun(StateUpdate).Connect(X, root.Id)
+
+	// Start RandR event monitor for immediate cache invalidation
+	go monitorRandREvents()
 }
 
 func Connected() bool {
@@ -533,6 +538,49 @@ func PointerUpdate(X *xgbutil.XUtil) *XPointer {
 	return Pointer
 }
 
+func monitorRandREvents() {
+	randrConn, err := xgbutil.NewConn()
+	if err != nil {
+		log.Warn("Failed to create RandR monitor connection: ", err)
+		return
+	}
+	defer randrConn.Conn().Close()
+
+	if err := randr.Init(randrConn.Conn()); err != nil {
+		log.Warn("Failed to initialize RandR: ", err)
+		return
+	}
+
+	if err := randr.SelectInputChecked(randrConn.Conn(), randrConn.RootWin(),
+		randr.NotifyMaskScreenChange|randr.NotifyMaskOutputChange).Check(); err != nil {
+		log.Warn("Failed to select RandR events: ", err)
+		return
+	}
+
+	log.Debug("RandR event monitor started")
+
+	for {
+		ev, err := randrConn.Conn().WaitForEvent()
+		if err != nil {
+			log.Warn("RandR monitor event error: ", err)
+			continue
+		}
+
+		switch ev.(type) {
+		case *randr.ScreenChangeNotifyEvent:
+			displaysCacheValid.Store(false)
+			log.WithFields(log.Fields{
+				"event": "ScreenChangeNotify",
+			}).Debug("RandR event: display cache invalidated")
+		case *randr.NotifyEvent:
+			displaysCacheValid.Store(false)
+			log.WithFields(log.Fields{
+				"event": "NotifyEvent",
+			}).Debug("RandR event: display cache invalidated")
+		}
+	}
+}
+
 func StateUpdate(X *xgbutil.XUtil, e xevent.PropertyNotifyEvent) {
 	start := time.Now()
 
@@ -553,7 +601,8 @@ func StateUpdate(X *xgbutil.XUtil, e xevent.PropertyNotifyEvent) {
 		displayStart := time.Now()
 		Workplace.Displays = DisplaysGet(X)
 		displaysCache = Workplace.Displays
-		displaysCacheValid = true
+		displaysCacheValid.Store(true)
+		displaysCacheTime.Store(time.Now().UnixNano())
 		displayElapsed := time.Since(displayStart)
 		log.WithFields(log.Fields{
 			"event":          aname,
@@ -561,7 +610,10 @@ func StateUpdate(X *xgbutil.XUtil, e xevent.PropertyNotifyEvent) {
 		}).Debug("store.StateUpdate.displayGet.refresh")
 	} else if common.IsInList(aname, []string{"_NET_DESKTOP_VIEWPORT"}) {
 		// Viewport changes (workspace switches) use cached display info
-		if displaysCacheValid {
+		cacheTime := time.Unix(0, displaysCacheTime.Load())
+		cacheAge := time.Since(cacheTime)
+		cacheTimeout := 5 * time.Minute
+		if displaysCacheValid.Load() && cacheAge < cacheTimeout {
 			Workplace.Displays = displaysCache
 			log.WithFields(log.Fields{
 				"event": aname,
@@ -570,12 +622,19 @@ func StateUpdate(X *xgbutil.XUtil, e xevent.PropertyNotifyEvent) {
 			displayStart := time.Now()
 			Workplace.Displays = DisplaysGet(X)
 			displaysCache = Workplace.Displays
-			displaysCacheValid = true
+			displaysCacheValid.Store(true)
+			displaysCacheTime.Store(time.Now().UnixNano())
 			displayElapsed := time.Since(displayStart)
+			if cacheAge >= cacheTimeout {
+				log.WithFields(log.Fields{
+					"event":    aname,
+					"cacheAge": cacheAge,
+				}).Debug("store.StateUpdate.displayCache.expired")
+			}
 			log.WithFields(log.Fields{
 				"event":          aname,
 				"displayElapsed": displayElapsed,
-			}).Debug("store.StateUpdate.displayGet")
+			}).Debug("store.StateUpdate.displayGet.cacheRefresh")
 		}
 	} else if common.IsInList(aname, []string{"_NET_CLIENT_LIST_STACKING"}) {
 		Windows.Stacked = ClientListStackingGet(X)
