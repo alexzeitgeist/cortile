@@ -187,12 +187,12 @@ func (ws *Workspace) CycleLayout(dir int) {
 }
 
 func (ws *Workspace) AddClient(c *store.Client) {
-	log.Info("Add client for each layout [", c.Latest.Class, "]")
+	log.Info("Add client for each layout [", c.GetLatest().Class, "]")
 	log.WithFields(log.Fields{
 		"workspace": ws.Name,
 		"desk":      ws.Location.Desktop,
 		"screen":    ws.Location.Screen,
-		"client":    c.Latest.Class,
+		"client":    c.GetLatest().Class,
 	}).Debug("workspace.addclient")
 
 	// Add client to all layouts
@@ -207,12 +207,12 @@ func (ws *Workspace) AddClient(c *store.Client) {
 }
 
 func (ws *Workspace) RemoveClient(c *store.Client) {
-	log.Info("Remove client from each layout [", c.Latest.Class, "]")
+	log.Info("Remove client from each layout [", c.GetLatest().Class, "]")
 	log.WithFields(log.Fields{
 		"workspace": ws.Name,
 		"desk":      ws.Location.Desktop,
 		"screen":    ws.Location.Screen,
-		"client":    c.Latest.Class,
+		"client":    c.GetLatest().Class,
 	}).Debug("workspace.removeclient")
 
 	// Remove client from all layouts

@@ -129,7 +129,7 @@ func (tr *Tracker) Update() {
 			removed++
 		} else {
 			// Only update clients on the current desktop to avoid unnecessary X11 calls
-			if existing != nil && existing.Latest != nil && existing.Latest.Location.Desktop == store.Workplace.CurrentDesktop {
+			if existing != nil && existing.GetLatest() != nil && existing.GetLatest().Location.Desktop == store.Workplace.CurrentDesktop {
 				existing.Update()
 				updated++
 			} else {
@@ -325,7 +325,7 @@ func (tr *Tracker) ClientWorkspace(c *store.Client) *Workspace {
 	if c == nil {
 		return nil
 	}
-	return tr.WorkspaceAt(c.Latest.Location.Desktop, c.Latest.Location.Screen)
+	return tr.WorkspaceAt(c.GetLatest().Location.Desktop, c.GetLatest().Location.Screen)
 }
 
 func (tr *Tracker) WorkspaceAt(desktop uint, screen uint) *Workspace {
@@ -352,7 +352,7 @@ func (tr *Tracker) ClientAt(ws *Workspace, p common.Point) *store.Client {
 		if c == nil {
 			continue
 		}
-		if common.IsInsideRect(p, c.Latest.Dimensions.Geometry) {
+		if common.IsInsideRect(p, c.GetLatest().Dimensions.Geometry) {
 			return c
 		}
 	}
@@ -507,7 +507,7 @@ func (tr *Tracker) handleMaximizedClient(c *store.Client) {
 		if ws.TilingDisabled() {
 			return
 		}
-		log.Debug("Client maximized handler fired [", c.Latest.Class, "]")
+		log.Debug("Client maximized handler fired [", c.GetLatest().Class, "]")
 
 		// Update client states
 		c.Update()
@@ -536,7 +536,7 @@ func (tr *Tracker) handleMinimizedClient(c *store.Client) {
 	hidden := store.IsMinimized(store.GetInfo(c.Window.Id))
 
 	if hidden {
-		log.Debug("Client minimized, untracking [", c.Latest.Class, "]")
+		log.Debug("Client minimized, untracking [", c.GetLatest().Class, "]")
 		tr.untrackWindow(c.Window.Id)
 		return
 	}
@@ -549,7 +549,7 @@ func (tr *Tracker) handleResizeClient(c *store.Client) {
 	}
 
 	// Previous dimensions
-	pGeom := c.Latest.Dimensions.Geometry
+	pGeom := c.GetLatest().Dimensions.Geometry
 	px, py, pw, ph := pGeom.Pieces()
 
 	// Current dimensions
@@ -570,14 +570,14 @@ func (tr *Tracker) handleResizeClient(c *store.Client) {
 		if !c.IsNew() && !tr.Handlers.ResizeClient.Active() {
 			tr.Handlers.ResizeClient = &Handler{Dragging: pt.Dragging(500), Source: c}
 		}
-		log.Debug("Client resize handler fired [", c.Latest.Class, "]")
+		log.Debug("Client resize handler fired [", c.GetLatest().Class, "]")
 
 		if tr.Handlers.ResizeClient.Dragging {
 
 			// Set client resize lock
 			if tr.Handlers.ResizeClient.Active() {
 				tr.Handlers.ResizeClient.Source.(*store.Client).Lock()
-				log.Debug("Client resize handler active [", c.Latest.Class, "]")
+				log.Debug("Client resize handler active [", c.GetLatest().Class, "]")
 			}
 
 			// Update proportions
@@ -604,7 +604,7 @@ func (tr *Tracker) handleMoveClient(c *store.Client) {
 	}
 
 	// Previous dimensions
-	pGeom := c.Latest.Dimensions.Geometry
+	pGeom := c.GetLatest().Dimensions.Geometry
 	px, py, pw, ph := pGeom.Pieces()
 
 	// Current dimensions
@@ -625,7 +625,7 @@ func (tr *Tracker) handleMoveClient(c *store.Client) {
 		if !c.IsNew() && !tr.Handlers.MoveClient.Active() {
 			tr.Handlers.MoveClient = &Handler{Dragging: pt.Dragging(500), Source: c}
 		}
-		log.Debug("Client move handler fired [", c.Latest.Class, "]")
+		log.Debug("Client move handler fired [", c.GetLatest().Class, "]")
 
 		// Obtain targets based on dragging indicator
 		targetPoint := *common.CreatePoint(cx, cy)
@@ -639,14 +639,14 @@ func (tr *Tracker) handleMoveClient(c *store.Client) {
 		tr.Handlers.SwapClient.Reset()
 		if co := tr.ClientAt(ws, targetPoint); co != nil && co != c {
 			tr.Handlers.SwapClient = &Handler{Source: c, Target: co}
-			log.Debug("Client swap handler active [", c.Latest.Class, "-", co.Latest.Class, "]")
+			log.Debug("Client swap handler active [", c.GetLatest().Class, "-", co.GetLatest().Class, "]")
 		}
 
 		// Check if target point moves to another screen
 		tr.Handlers.SwapScreen.Reset()
-		if c.Latest.Location.Screen != targetScreen {
+		if c.GetLatest().Location.Screen != targetScreen {
 			tr.Handlers.SwapScreen = &Handler{Source: c, Target: tr.WorkspaceAt(targetDesktop, targetScreen)}
-			log.Debug("Screen swap handler active [", c.Latest.Class, "]")
+			log.Debug("Screen swap handler active [", c.GetLatest().Class, "]")
 		}
 	}
 }
@@ -657,7 +657,7 @@ func (tr *Tracker) handleSwapClient(h *Handler) {
 	if !tr.isTracked(c.Window.Id) {
 		return
 	}
-	log.Debug("Client swap handler fired [", c.Latest.Class, "-", target.Latest.Class, "]")
+	log.Debug("Client swap handler fired [", c.GetLatest().Class, "-", target.GetLatest().Class, "]")
 
 	// Swap clients on same desktop and screen
 	mg := ws.ActiveLayout().GetManager()
@@ -681,7 +681,7 @@ func (tr *Tracker) handleWorkspaceChange(h *Handler) {
 	if !tr.isTracked(c.Window.Id) {
 		return
 	}
-	log.Debug("Client workspace handler fired [", c.Latest.Class, "]")
+	log.Debug("Client workspace handler fired [", c.GetLatest().Class, "]")
 
 	// Remove client from current workspace
 	ws := tr.ClientWorkspace(c)
@@ -745,7 +745,7 @@ func (tr *Tracker) onStateUpdate(state string, desktop uint, screen uint) {
 
 		// Update sticky windows
 		for _, c := range tr.snapshotClientList() {
-			if store.IsSticky(c.Latest) && c.Latest.Location.Desktop != store.Workplace.CurrentDesktop {
+			if store.IsSticky(c.GetLatest()) && c.GetLatest().Location.Desktop != store.Workplace.CurrentDesktop {
 				c.MoveToDesktop(^uint32(0))
 			}
 		}
@@ -827,7 +827,7 @@ func (tr *Tracker) attachHandlers(c *store.Client) {
 
 	// Attach structure events
 	xevent.ConfigureNotifyFun(func(X *xgbutil.XUtil, ev xevent.ConfigureNotifyEvent) {
-		log.Trace("Client structure event [", c.Latest.Class, "]")
+		log.Trace("Client structure event [", c.GetLatest().Class, "]")
 
 		// Handle structure events
 		tr.handleResizeClient(c)
@@ -840,7 +840,7 @@ func (tr *Tracker) attachHandlers(c *store.Client) {
 	// Attach property events
 	xevent.PropertyNotifyFun(func(X *xgbutil.XUtil, ev xevent.PropertyNotifyEvent) {
 		aname, _ := xprop.AtomName(store.X, ev.Atom)
-		log.Trace("Client property event ", aname, " [", c.Latest.Class, "]")
+		log.Trace("Client property event ", aname, " [", c.GetLatest().Class, "]")
 
 		// Handle property events
 		if aname == "_NET_WM_STATE" {

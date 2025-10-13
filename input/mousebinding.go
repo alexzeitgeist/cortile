@@ -110,7 +110,7 @@ func updateFocus(tr *desktop.Tracker) {
 	if active == nil || hovered == nil {
 		return
 	}
-	log.Info("Hovered window updated [", hovered.Latest.Class, "]")
+	log.Info("Hovered window updated [", hovered.GetLatest().Class, "]")
 
 	// Delay hover event by given duration
 	hover = time.AfterFunc(time.Duration(common.Config.WindowFocusDelay)*time.Millisecond, func() {

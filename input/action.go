@@ -465,7 +465,7 @@ func NextScreen(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		return false
 	}
 
-	screen := int(c.Latest.Location.Screen) + 1
+	screen := int(c.GetLatest().Location.Screen) + 1
 	if screen > int(store.Workplace.ScreenCount)-1 {
 		return false
 	}
@@ -479,7 +479,7 @@ func PreviousScreen(tr *desktop.Tracker, ws *desktop.Workspace) bool {
 		return false
 	}
 
-	screen := int(c.Latest.Location.Screen) - 1
+	screen := int(c.GetLatest().Location.Screen) - 1
 	if screen < 0 {
 		return false
 	}

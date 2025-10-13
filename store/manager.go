@@ -89,9 +89,8 @@ func (mg *Manager) AddClient(c *Client) {
 		return
 	}
 
-	log.Debug("Add client for manager [", c.Latest.Class, ", ", mg.Name, "]")
+	log.Debug("Add client for manager [", c.GetLatest().Class, ", ", mg.Name, "]")
 
-	// Fill up master area then slave area
 	if len(mg.Masters.Stacked) < mg.Masters.Maximum {
 		mg.Masters.Stacked = addClient(mg.Masters.Stacked, c)
 	} else {
@@ -100,7 +99,7 @@ func (mg *Manager) AddClient(c *Client) {
 }
 
 func (mg *Manager) RemoveClient(c *Client) {
-	log.Debug("Remove client from manager [", c.Latest.Class, ", ", mg.Name, "]")
+	log.Debug("Remove client from manager [", c.GetLatest().Class, ", ", mg.Name, "]")
 
 	// Remove master window
 	mi := mg.Index(mg.Masters, c)
@@ -121,16 +120,15 @@ func (mg *Manager) RemoveClient(c *Client) {
 }
 
 func (mg *Manager) MakeMaster(c *Client) {
-	log.Info("Make window master [", c.Latest.Class, ", ", mg.Name, "]")
+	log.Info("Make window master [", c.GetLatest().Class, ", ", mg.Name, "]")
 
-	// Swap window with first master
 	if len(mg.Masters.Stacked) > 0 {
 		mg.SwapClient(c, mg.Masters.Stacked[0])
 	}
 }
 
 func (mg *Manager) SwapClient(c1 *Client, c2 *Client) {
-	log.Info("Swap clients [", c1.Latest.Class, "-", c2.Latest.Class, ", ", mg.Name, "]")
+	log.Info("Swap clients [", c1.GetLatest().Class, "-", c2.GetLatest().Class, ", ", mg.Name, "]")
 
 	mIndex1 := mg.Index(mg.Masters, c1)
 	sIndex1 := mg.Index(mg.Slaves, c1)

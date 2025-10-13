@@ -32,9 +32,22 @@ type Client struct {
 	Locked   bool      // Internal client move/resize lock
 	Original *Info     `json:"-"` // Original client window information
 	Cached   *Info     `json:"-"` // Cached client window information
-	Latest   *Info     // Latest client window information
+	Latest   *Info     // Latest client window information (for JSON)
+	latestMu sync.RWMutex
 	mu       sync.Mutex
 	dirty    bool // Internal flag for cache write optimization
+}
+
+func (c *Client) GetLatest() *Info {
+	c.latestMu.RLock()
+	defer c.latestMu.RUnlock()
+	return c.Latest
+}
+
+func (c *Client) setLatest(info *Info) {
+	c.latestMu.Lock()
+	c.Latest = info
+	c.latestMu.Unlock()
 }
 
 type Info struct {
@@ -76,21 +89,22 @@ func CreateClient(w xproto.Window) *Client {
 		Locked:   false,
 		Original: original,
 		Cached:   cached,
-		Latest:   latest,
 		dirty:    true,
 	}
+	c.setLatest(latest)
 
 	cachedData := c.Read()
 
-	c.Cached.States = cachedData.Latest.States
-	c.Cached.Dimensions.Geometry = cachedData.Latest.Dimensions.Geometry
-	c.Cached.Location.Screen = ScreenGet(cachedData.Latest.Dimensions.Geometry.Center())
+	c.Cached.States = cachedData.GetLatest().States
+	c.Cached.Dimensions.Geometry = cachedData.GetLatest().Dimensions.Geometry
+	c.Cached.Location.Screen = ScreenGet(cachedData.GetLatest().Dimensions.Geometry.Center())
 
 	c.Restore(Cached)
 
-	c.Latest.States = c.Cached.States
-	c.Latest.Dimensions.Geometry = c.Cached.Dimensions.Geometry
-	c.Latest.Location.Screen = c.Cached.Location.Screen
+	latestInfo := c.GetLatest()
+	latestInfo.States = c.Cached.States
+	latestInfo.Dimensions.Geometry = c.Cached.Dimensions.Geometry
+	latestInfo.Location.Screen = c.Cached.Location.Screen
 
 	return c
 }
@@ -146,11 +160,9 @@ func (c *Client) Limit(w, h int) bool {
 		return false
 	}
 
-	// Decoration extents
-	ext := c.Latest.Dimensions.Extents
+	ext := c.GetLatest().Dimensions.Extents
 	dw, dh := ext.Left+ext.Right, ext.Top+ext.Bottom
 
-	// Set window size limits
 	nhints := c.Cached.Dimensions.Hints.Normal
 	nhints.Flags |= icccm.SizeHintPMinSize
 	nhints.MinWidth = uint(w - dw)
@@ -175,11 +187,11 @@ func (c *Client) Decorate() bool {
 	if _, exists := common.Config.Keys["decoration"]; !exists {
 		return false
 	}
-	if motif.Decor(&c.Latest.Dimensions.Hints.Motif) || !motif.Decor(&c.Original.Dimensions.Hints.Motif) {
+	latest := c.GetLatest()
+	if motif.Decor(&latest.Dimensions.Hints.Motif) || !motif.Decor(&c.Original.Dimensions.Hints.Motif) {
 		return false
 	}
 
-	// Add window decorations
 	mhints := c.Cached.Dimensions.Hints.Motif
 	mhints.Flags |= motif.HintDecorations
 	mhints.Decoration = motif.DecorationAll
@@ -192,11 +204,11 @@ func (c *Client) UnDecorate() bool {
 	if _, exists := common.Config.Keys["decoration"]; !exists {
 		return false
 	}
-	if !motif.Decor(&c.Latest.Dimensions.Hints.Motif) && motif.Decor(&c.Original.Dimensions.Hints.Motif) {
+	latest := c.GetLatest()
+	if !motif.Decor(&latest.Dimensions.Hints.Motif) && motif.Decor(&c.Original.Dimensions.Hints.Motif) {
 		return false
 	}
 
-	// Remove window decorations
 	mhints := c.Cached.Dimensions.Hints.Motif
 	mhints.Flags |= motif.HintDecorations
 	mhints.Decoration = motif.DecorationNone
@@ -206,33 +218,30 @@ func (c *Client) UnDecorate() bool {
 }
 
 func (c *Client) Fullscreen() bool {
-	if IsFullscreen(c.Latest) {
+	if IsFullscreen(c.GetLatest()) {
 		return false
 	}
 
-	// Fullscreen window
 	ewmh.WmStateReq(X, c.Window.Id, ewmh.StateAdd, "_NET_WM_STATE_FULLSCREEN")
 
 	return true
 }
 
 func (c *Client) UnFullscreen() bool {
-	if !IsFullscreen(c.Latest) {
+	if !IsFullscreen(c.GetLatest()) {
 		return false
 	}
 
-	// Unfullscreen window
 	ewmh.WmStateReq(X, c.Window.Id, ewmh.StateRemove, "_NET_WM_STATE_FULLSCREEN")
 
 	return true
 }
 
 func (c *Client) UnMaximize() bool {
-	if !IsMaximized(c.Latest) {
+	if !IsMaximized(c.GetLatest()) {
 		return false
 	}
 
-	// Unmaximize window
 	ewmh.WmStateReq(X, c.Window.Id, ewmh.StateRemove, "_NET_WM_STATE_MAXIMIZED_VERT")
 	ewmh.WmStateReq(X, c.Window.Id, ewmh.StateRemove, "_NET_WM_STATE_MAXIMIZED_HORZ")
 
@@ -267,64 +276,55 @@ func (c *Client) MoveToScreen(screen uint32) bool {
 
 func (c *Client) MoveWindow(x, y, w, h int) {
 	if c.Locked {
-		log.Info("Reject window move/resize [", c.Latest.Class, "]")
+		log.Info("Reject window move/resize [", c.GetLatest().Class, "]")
 
-		// Remove lock
 		c.UnLock()
 		return
 	}
 
-	// Remove unwanted properties
 	c.UnMaximize()
 	c.UnFullscreen()
 
-	// Calculate dimension offsets
-	ext := c.Latest.Dimensions.Extents
+	latest := c.GetLatest()
+	ext := latest.Dimensions.Extents
 	dx, dy, dw, dh := 0, 0, 0, 0
 
-	if c.Latest.Dimensions.AdjPos {
+	if latest.Dimensions.AdjPos {
 		dx, dy = ext.Left, ext.Top
 	}
-	if c.Latest.Dimensions.AdjSize {
+	if latest.Dimensions.AdjSize {
 		dw, dh = ext.Left+ext.Right, ext.Top+ext.Bottom
 	}
 
-	// Move and/or resize window
 	if w > 0 && h > 0 {
 		ewmh.MoveresizeWindow(X, c.Window.Id, x+dx, y+dy, w-dw, h-dh)
 	} else {
 		ewmh.MoveWindow(X, c.Window.Id, x+dx, y+dy)
 	}
 
-	// Update stored dimensions
 	c.Update()
 }
 
 func (c *Client) OuterGeometry() (x, y, w, h int) {
 
-	// Outer window dimensions (x/y relative to workspace)
 	oGeom, err := c.Window.Instance.DecorGeometry()
 	if err != nil {
 		return
 	}
 
-	// Inner window dimensions (x/y relative to outer window)
 	iGeom, err := xwindow.RawGeometry(X, xproto.Drawable(c.Window.Id))
 	if err != nil {
 		return
 	}
 
-	// Reset inner window positions (some wm won't return x/y relative to outer window)
 	if reflect.DeepEqual(oGeom, iGeom) {
 		iGeom.XSet(0)
 		iGeom.YSet(0)
 	}
 
-	// Decoration extents (l/r/t/b relative to outer window dimensions)
-	ext := c.Latest.Dimensions.Extents
+	ext := c.GetLatest().Dimensions.Extents
 	dx, dy, dw, dh := ext.Left, ext.Top, ext.Left+ext.Right, ext.Top+ext.Bottom
 
-	// Calculate outer geometry (including server and client decorations)
 	x, y, w, h = oGeom.X()+iGeom.X()-dx, oGeom.Y()+iGeom.Y()-dy, iGeom.Width()+dw, iGeom.Height()+dh
 
 	return
@@ -357,14 +357,15 @@ func (c *Client) Restore(flag uint8) {
 		c.Update()
 	}
 
-	// Disable adjustments on restore
-	if c.Latest.Dimensions.AdjRestore {
+	latest := c.GetLatest()
+	if latest.Dimensions.AdjRestore {
+		c.latestMu.Lock()
 		c.Latest.Dimensions.AdjPos = false
 		c.Latest.Dimensions.AdjSize = false
+		c.latestMu.Unlock()
 	}
 
-	// Move window to restore position
-	geom := c.Latest.Dimensions.Geometry
+	geom := latest.Dimensions.Geometry
 	switch flag {
 	case Original:
 		geom = c.Original.Dimensions.Geometry
@@ -386,12 +387,10 @@ func (c *Client) Update() {
 		"elapsed": elapsed,
 	}).Debug("client.update")
 
-	// Check if geometry, states, or location changed
-	oldInfo := c.Latest
+	oldInfo := c.GetLatest()
 	if oldInfo != nil {
 		geomChanged := !reflect.DeepEqual(info.Dimensions.Geometry, oldInfo.Dimensions.Geometry)
 
-		// Only compare persistent states that matter for cache restoration
 		oldPersistentStates := filterPersistentStates(oldInfo.States)
 		newPersistentStates := filterPersistentStates(info.States)
 		statesChanged := !reflect.DeepEqual(newPersistentStates, oldPersistentStates)
@@ -412,8 +411,7 @@ func (c *Client) Update() {
 		}
 	}
 
-	// Update client info
-	c.Latest = info
+	c.setLatest(info)
 }
 
 func (c *Client) Write() {
@@ -424,33 +422,32 @@ func (c *Client) Write() {
 	c.mu.Lock()
 	if !c.dirty {
 		c.mu.Unlock()
-		log.Trace("Skip clean client cache write [", c.Latest.Class, "]")
+		latest := c.GetLatest()
+		log.Trace("Skip clean client cache write [", latest.Class, "]")
 		return
 	}
 	c.mu.Unlock()
 
 	start := time.Now()
 
-	// Obtain cache object
 	cache := c.Cache()
+	latest := c.GetLatest()
 	log.WithFields(log.Fields{
-		"client": c.Latest.Class,
-		"desk":   c.Latest.Location.Desktop,
+		"client": latest.Class,
+		"desk":   latest.Location.Desktop,
 		"path":   cache.Name,
 	}).Debug("client.cache.write.start")
 
-	// Parse client cache
 	data, err := json.MarshalIndent(cache.Data, "", "  ")
 	if err != nil {
-		log.Warn("Error parsing client cache [", c.Latest.Class, "]")
+		log.Warn("Error parsing client cache [", latest.Class, "]")
 		return
 	}
 
-	// Write client cache atomically to avoid partial files that break reads
 	path := filepath.Join(cache.Folder, cache.Name)
 	tmp, err := os.CreateTemp(cache.Folder, cache.Name+".tmp-*")
 	if err != nil {
-		log.Warn("Error creating client cache temp file [", c.Latest.Class, "]")
+		log.Warn("Error creating client cache temp file [", latest.Class, "]")
 		return
 	}
 	tmpName := tmp.Name()
@@ -467,24 +464,24 @@ func (c *Client) Write() {
 		}
 	}()
 	if _, err = tmp.Write(data); err != nil {
-		log.Warn("Error writing client cache temp file [", c.Latest.Class, "]")
+		log.Warn("Error writing client cache temp file [", latest.Class, "]")
 		return
 	}
 	if err = tmp.Sync(); err != nil {
-		log.Warn("Error syncing client cache temp file [", c.Latest.Class, "]")
+		log.Warn("Error syncing client cache temp file [", latest.Class, "]")
 		return
 	}
 	if err = tmp.Close(); err != nil {
-		log.Warn("Error closing client cache temp file [", c.Latest.Class, "]")
+		log.Warn("Error closing client cache temp file [", latest.Class, "]")
 		return
 	}
 	closed = true
 	if err = os.Chmod(tmpName, 0644); err != nil {
-		log.Warn("Error chmod client cache temp file [", c.Latest.Class, "]")
+		log.Warn("Error chmod client cache temp file [", latest.Class, "]")
 		return
 	}
 	if err = os.Rename(tmpName, path); err != nil {
-		log.Warn("Error replacing client cache [", c.Latest.Class, "]")
+		log.Warn("Error replacing client cache [", latest.Class, "]")
 		return
 	}
 	cleanup = nil
@@ -495,7 +492,7 @@ func (c *Client) Write() {
 
 	elapsed := time.Since(start)
 	log.WithFields(log.Fields{
-		"client":  c.Latest.Class,
+		"client":  latest.Class,
 		"path":    cache.Name,
 		"elapsed": elapsed,
 	}).Debug("client.cache.write.complete")
@@ -506,49 +503,46 @@ func (c *Client) Read() *Client {
 		return c
 	}
 
-	// Obtain cache object
 	cache := c.Cache()
+	latest := c.GetLatest()
 
-	// Read client cache
 	path := filepath.Join(cache.Folder, cache.Name)
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		log.Info("No client cache found [", c.Latest.Class, "]")
+		log.Info("No client cache found [", latest.Class, "]")
 		return c
 	}
 	if err != nil {
-		log.Warn("Error opening client cache [", c.Latest.Class, "]")
+		log.Warn("Error opening client cache [", latest.Class, "]")
 		return c
 	}
 	if len(data) == 0 {
-		log.Warn("Empty client cache [", c.Latest.Class, "]")
+		log.Warn("Empty client cache [", latest.Class, "]")
 		return c
 	}
 
-	// Parse client cache
 	cached := &Client{}
 	err = json.Unmarshal([]byte(data), &cached)
 	if err != nil {
-		log.Warn("Error reading client cache [", c.Latest.Class, "]")
+		log.Warn("Error reading client cache [", latest.Class, "]")
 		return c
 	}
 
-	log.Debug("Read client cache data ", cache.Name, " [", c.Latest.Class, "]")
+	log.Debug("Read client cache data ", cache.Name, " [", latest.Class, "]")
 
 	return cached
 }
 
 func (c *Client) Cache() common.Cache[*Client] {
-	subfolder := c.Latest.Class
-	filename := fmt.Sprintf("%s-%d", subfolder, c.Latest.Location.Desktop)
+	latest := c.GetLatest()
+	subfolder := latest.Class
+	filename := fmt.Sprintf("%s-%d", subfolder, latest.Location.Desktop)
 
-	// Create client cache folder
 	folder := filepath.Join(common.Args.Cache, "workplaces", Workplace.Displays.Name, "clients", subfolder)
 	if _, err := os.Stat(folder); os.IsNotExist(err) {
 		os.MkdirAll(folder, 0755)
 	}
 
-	// Create client cache object
 	cache := common.Cache[*Client]{
 		Folder: folder,
 		Name:   common.HashString(filename, 20) + ".json",
