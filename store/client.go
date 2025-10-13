@@ -30,7 +30,6 @@ type Client struct {
 	Window   *XWindow  // X window object
 	Created  time.Time // Internal client creation time
 	Locked   bool      // Internal client move/resize lock
-	Hidden   bool      `json:"-"` // Internal minimized/hidden state
 	Original *Info     `json:"-"` // Original client window information
 	Cached   *Info     `json:"-"` // Cached client window information
 	Latest   *Info     // Latest client window information
@@ -75,7 +74,6 @@ func CreateClient(w xproto.Window) *Client {
 		Window:   CreateXWindow(w),
 		Created:  time.Now(),
 		Locked:   false,
-		Hidden:   common.IsInList("_NET_WM_STATE_HIDDEN", original.States),
 		Original: original,
 		Cached:   cached,
 		Latest:   latest,
@@ -115,18 +113,6 @@ func (c *Client) IsDirty() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.dirty
-}
-
-func (c *Client) GetHidden() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.Hidden
-}
-
-func (c *Client) SetHidden(hidden bool) {
-	c.mu.Lock()
-	c.Hidden = hidden
-	c.mu.Unlock()
 }
 
 // filterPersistentStates returns only states that matter for cache persistence.

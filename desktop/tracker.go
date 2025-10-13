@@ -536,21 +536,9 @@ func (tr *Tracker) handleMinimizedClient(c *store.Client) {
 	hidden := store.IsMinimized(store.GetInfo(c.Window.Id))
 
 	if hidden {
-		if c.GetHidden() {
-			return
-		}
-		c.SetHidden(true)
-		log.Debug("Client hidden handler fired [", c.Latest.Class, "]")
-		ws.RemoveClient(c)
-		ws.Tile()
+		log.Debug("Client minimized, untracking [", c.Latest.Class, "]")
+		tr.untrackWindow(c.Window.Id)
 		return
-	}
-
-	if c.GetHidden() {
-		c.SetHidden(false)
-		log.Debug("Client restore handler fired [", c.Latest.Class, "]")
-		ws.AddClient(c)
-		ws.Tile()
 	}
 }
 
