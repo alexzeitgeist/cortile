@@ -7,6 +7,7 @@ import (
 	"github.com/jezek/xgb/xproto"
 
 	"github.com/jezek/xgbutil"
+	"github.com/jezek/xgbutil/ewmh"
 	"github.com/jezek/xgbutil/xevent"
 	"github.com/jezek/xgbutil/xprop"
 
@@ -102,6 +103,14 @@ func CreateTracker() *Tracker {
 }
 
 func (tr *Tracker) Update() {
+	tr.update(false)
+}
+
+func (tr *Tracker) UpdateOnDesktopSwitch() {
+	tr.update(true)
+}
+
+func (tr *Tracker) update(forceRefreshDesktop bool) {
 	start := time.Now()
 	ws := tr.ActiveWorkspace()
 	if ws.TilingDisabled() {
@@ -128,8 +137,18 @@ func (tr *Tracker) Update() {
 			tr.untrackWindow(w)
 			removed++
 		} else {
-			// Only update clients on the current desktop to avoid unnecessary X11 calls
-			if existing != nil && existing.GetLatest() != nil && existing.GetLatest().Location.Desktop == store.Workplace.CurrentDesktop {
+			shouldUpdate := false
+			if forceRefreshDesktop {
+				// Force-query actual desktop on desktop switch
+				actualDesktop, err := ewmh.WmDesktopGet(store.X, w)
+				if err == nil && actualDesktop == store.Workplace.CurrentDesktop {
+					shouldUpdate = true
+				}
+			} else if existing != nil && existing.GetLatest() != nil && existing.GetLatest().Location.Desktop == store.Workplace.CurrentDesktop {
+				shouldUpdate = true
+			}
+
+			if shouldUpdate {
 				existing.Update()
 				updated++
 			} else {
@@ -760,7 +779,11 @@ func (tr *Tracker) onStateUpdate(state string, desktop uint, screen uint) {
 		tr.unlockClients()
 
 		// Update trackable clients
-		tr.Update()
+		if workspaceChanged {
+			tr.UpdateOnDesktopSwitch()
+		} else {
+			tr.Update()
+		}
 	}
 
 	// Persist cache only when topology really changed
