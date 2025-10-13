@@ -751,7 +751,7 @@ func (tr *Tracker) onStateUpdate(state string, desktop uint, screen uint) {
 		}
 	}
 
-	if viewportChanged || clientsChanged {
+	if workspaceChanged || viewportChanged || clientsChanged {
 
 		// Deactivate handlers
 		tr.Handlers.Reset()
