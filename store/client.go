@@ -66,27 +66,26 @@ const (
 )
 
 func CreateClient(w xproto.Window) *Client {
-	info := GetInfo(w)
+	original := GetInfo(w)
+	cached := GetInfo(w)
+	latest := GetInfo(w)
 	c := &Client{
 		Window:   CreateXWindow(w),
 		Created:  time.Now(),
 		Locked:   false,
-		Hidden:   common.IsInList("_NET_WM_STATE_HIDDEN", info.States),
-		Original: info,
-		Cached:   info,
-		Latest:   info,
-		dirty:    true, // Mark new clients dirty to ensure initial write
+		Hidden:   common.IsInList("_NET_WM_STATE_HIDDEN", original.States),
+		Original: original,
+		Cached:   cached,
+		Latest:   latest,
+		dirty:    true,
 	}
 
-	// Read client from cache
-	cached := c.Read()
+	cachedData := c.Read()
 
-	// Overwrite states, geometry and location
-	c.Cached.States = cached.Latest.States
-	c.Cached.Dimensions.Geometry = cached.Latest.Dimensions.Geometry
-	c.Cached.Location.Screen = ScreenGet(cached.Latest.Dimensions.Geometry.Center())
+	c.Cached.States = cachedData.Latest.States
+	c.Cached.Dimensions.Geometry = cachedData.Latest.Dimensions.Geometry
+	c.Cached.Location.Screen = ScreenGet(cachedData.Latest.Dimensions.Geometry.Center())
 
-	// Restore window position
 	c.Restore(Cached)
 
 	c.Latest.States = c.Cached.States
