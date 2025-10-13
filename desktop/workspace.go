@@ -414,10 +414,30 @@ func (ws *Workspace) Write() {
 		return
 	}
 	if err = os.Rename(tmpName, path); err != nil {
-		log.Warn("Error replacing workspace cache [", ws.Name, "]")
-		return
+		log.WithFields(log.Fields{
+			"workspace": ws.Name,
+			"path":      path,
+			"error":     err,
+		}).Warn("workspace cache rename failed, attempting fallback copy")
+		if errCopy := store.CopyFileContents(tmpName, path, 0644); errCopy != nil {
+			log.WithFields(log.Fields{
+				"workspace": ws.Name,
+				"path":      path,
+				"error":     errCopy,
+			}).Error("workspace cache fallback copy failed")
+			return
+		}
+		cleanup = nil
+		if errRemove := os.Remove(tmpName); errRemove != nil && !os.IsNotExist(errRemove) {
+			log.WithFields(log.Fields{
+				"workspace": ws.Name,
+				"path":      tmpName,
+				"error":     errRemove,
+			}).Debug("workspace cache temp removal failed after fallback")
+		}
+	} else {
+		cleanup = nil
 	}
-	cleanup = nil
 	writeFailed = false
 
 	log.Trace("Write workspace cache data ", cache.Name, " [", snapshot.Name, "]")

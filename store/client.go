@@ -520,10 +520,30 @@ func (c *Client) Write() {
 		return
 	}
 	if err = os.Rename(tmpName, path); err != nil {
-		log.Warn("Error replacing client cache [", latest.Class, "]")
-		return
+		log.WithFields(log.Fields{
+			"client": latest.Class,
+			"path":   path,
+			"error":  err,
+		}).Warn("client cache rename failed, attempting fallback copy")
+		if errCopy := CopyFileContents(tmpName, path, 0644); errCopy != nil {
+			log.WithFields(log.Fields{
+				"client": latest.Class,
+				"path":   path,
+				"error":  errCopy,
+			}).Error("client cache fallback copy failed")
+			return
+		}
+		cleanup = nil
+		if errRemove := os.Remove(tmpName); errRemove != nil && !os.IsNotExist(errRemove) {
+			log.WithFields(log.Fields{
+				"client": latest.Class,
+				"path":   tmpName,
+				"error":  errRemove,
+			}).Debug("client cache temp removal failed after fallback")
+		}
+	} else {
+		cleanup = nil
 	}
-	cleanup = nil
 	writeFailed = false
 
 	elapsed := time.Since(start)
