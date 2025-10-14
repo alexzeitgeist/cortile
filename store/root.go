@@ -539,45 +539,82 @@ func PointerUpdate(X *xgbutil.XUtil) *XPointer {
 }
 
 func monitorRandREvents() {
-	randrConn, err := xgbutil.NewConn()
-	if err != nil {
-		log.Warn("Failed to create RandR monitor connection: ", err)
-		return
+	// Reconnect loop with exponential backoff to avoid CPU/log spam on failures.
+	const (
+		minBackoff = 100 * time.Millisecond
+		maxBackoff = 5 * time.Second
+	)
+	backoff := minBackoff
+	resetBackoff := func() {
+		backoff = minBackoff
 	}
-	defer randrConn.Conn().Close()
-
-	if err := randr.Init(randrConn.Conn()); err != nil {
-		log.Warn("Failed to initialize RandR: ", err)
-		return
+	sleepBackoff := func() {
+		time.Sleep(backoff)
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
 	}
-
-	if err := randr.SelectInputChecked(randrConn.Conn(), randrConn.RootWin(),
-		randr.NotifyMaskScreenChange|randr.NotifyMaskOutputChange).Check(); err != nil {
-		log.Warn("Failed to select RandR events: ", err)
-		return
-	}
-
-	log.Debug("RandR event monitor started")
 
 	for {
-		ev, err := randrConn.Conn().WaitForEvent()
+		// Establish a dedicated connection for RandR monitoring
+		randrConn, err := xgbutil.NewConn()
 		if err != nil {
-			log.Warn("RandR monitor event error: ", err)
+			log.WithError(err).Warn("RandR monitor connect failed; retrying")
+			sleepBackoff()
 			continue
 		}
 
-		switch ev.(type) {
-		case *randr.ScreenChangeNotifyEvent:
-			displaysCacheValid.Store(false)
-			log.WithFields(log.Fields{
-				"event": "ScreenChangeNotify",
-			}).Debug("RandR event: display cache invalidated")
-		case *randr.NotifyEvent:
-			displaysCacheValid.Store(false)
-			log.WithFields(log.Fields{
-				"event": "NotifyEvent",
-			}).Debug("RandR event: display cache invalidated")
+		// Ensure connection is closed on reconnect or error
+		// (no defer inside the loop to avoid piling up defers)
+		conn := randrConn.Conn()
+
+		if err := randr.Init(conn); err != nil {
+			log.WithError(err).Warn("RandR init failed; retrying")
+			conn.Close()
+			sleepBackoff()
+			continue
 		}
+
+		if err := randr.SelectInputChecked(conn, randrConn.RootWin(),
+			randr.NotifyMaskScreenChange|randr.NotifyMaskOutputChange).Check(); err != nil {
+			log.WithError(err).Warn("RandR select input failed; retrying")
+			conn.Close()
+			sleepBackoff()
+			continue
+		}
+
+		log.Debug("RandR event monitor started")
+		// Reset backoff after a successful (re)connect
+		resetBackoff()
+
+		// Event loop. On permanent error we break to reconnect with backoff
+		for {
+			ev, err := conn.WaitForEvent()
+			if err != nil {
+				log.WithError(err).Warn("RandR monitor disconnected; will retry")
+				conn.Close()
+				break
+			}
+
+			switch ev.(type) {
+			case *randr.ScreenChangeNotifyEvent:
+				displaysCacheValid.Store(false)
+				log.WithFields(log.Fields{
+					"event": "ScreenChangeNotify",
+				}).Debug("RandR event: display cache invalidated")
+			case *randr.NotifyEvent:
+				displaysCacheValid.Store(false)
+				log.WithFields(log.Fields{
+					"event": "NotifyEvent",
+				}).Debug("RandR event: display cache invalidated")
+			}
+		}
+
+		// Sleep with backoff before trying to reconnect
+		sleepBackoff()
 	}
 }
 
