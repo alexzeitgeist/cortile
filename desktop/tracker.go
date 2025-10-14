@@ -134,10 +134,11 @@ func (tr *Tracker) update(forceRefreshDesktop bool) {
 	skipped := 0
 	ignored := 0
 
-	// Map trackable windows
+	// Map trackable windows by fetching info once per window
 	trackable := make(map[xproto.Window]bool)
 	for _, w := range store.Windows.Stacked {
-		trackable[w.Id] = tr.isTrackable(w.Id)
+		info := store.GetInfo(w.Id)
+		trackable[w.Id] = tr.isTrackableInfo(info)
 	}
 
 	// Remove untrackable windows and update tracked ones
@@ -149,9 +150,9 @@ func (tr *Tracker) update(forceRefreshDesktop bool) {
 		} else {
 			shouldUpdate := false
 			if forceRefreshDesktop {
-				// Force-query actual desktop on desktop switch
-				actualDesktop, err := ewmh.WmDesktopGet(store.X, w)
-				if err == nil && actualDesktop == store.Workplace.CurrentDesktop {
+				// Use a fresh desktop query here to avoid stale classification
+				// during rapid workspace switches (some WMs update properties in phases).
+				if actualDesktop, err := ewmh.WmDesktopGet(store.X, w); err == nil && actualDesktop == store.Workplace.CurrentDesktop {
 					shouldUpdate = true
 				}
 			} else if existing != nil && existing.GetLatest() != nil && existing.GetLatest().Location.Desktop == store.Workplace.CurrentDesktop {
