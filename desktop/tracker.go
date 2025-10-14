@@ -17,7 +17,11 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// Write scheduling parameters
+// - writeDebounce: trailing debounce on the last change
+// - writeMaxWait:  hard cap to ensure we persist at least this often during activity bursts
 const writeDebounce = 750 * time.Millisecond
+const writeMaxWait = 5 * time.Second
 
 type writeRequest struct {
 	done chan struct{}
@@ -903,11 +907,28 @@ func (tr *Tracker) isTrackableInfo(info *store.Info) bool {
 }
 
 func (tr *Tracker) ScheduleWrite() {
-	deadline := time.Now().Add(writeDebounce)
-	tr.writeMu.Lock()
-	if !tr.writeDue || deadline.Before(tr.writeDueAt) {
-		tr.writeDueAt = deadline
+	now := time.Now()
+	// Trailing debounce target
+	debounceAt := now.Add(writeDebounce)
+	// Enforce a periodic flush at most every writeMaxWait since last successful write
+	maxAt := debounceAt
+	if !tr.lastWrite.IsZero() {
+		maxAt = tr.lastWrite.Add(writeMaxWait)
+		if maxAt.Before(now) {
+			maxAt = now
+		}
+	} else {
+		// No last write yet: behave like plain debounce
+		maxAt = debounceAt
 	}
+	// Next scheduled time is the earlier of debounce target and max-wait cap
+	next := debounceAt
+	if maxAt.Before(next) {
+		next = maxAt
+	}
+
+	tr.writeMu.Lock()
+	tr.writeDueAt = next
 	tr.writeDue = true
 
 	delay := time.Until(tr.writeDueAt)
