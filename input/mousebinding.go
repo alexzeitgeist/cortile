@@ -1,6 +1,7 @@
 package input
 
 import (
+	"sync"
 	"time"
 
 	"github.com/leukipp/cortile/v2/common"
@@ -12,34 +13,74 @@ import (
 )
 
 var (
-	workspace *desktop.Workspace // Stores previous workspace (for comparison only)
-	pointer   *store.XPointer    // Stores previous pointer (for comparison only)
-	hover     *time.Timer        // Timer to delay hover events
+	workspace    *desktop.Workspace // Stores previous workspace (for comparison only)
+	pointer      *store.XPointer    // Stores previous pointer (for comparison only)
+	hover        *time.Timer        // Timer to delay hover events
+	dragPollTick *time.Ticker       // Ticker for drag-time polling
+	dragPollStop chan struct{}      // Signal to stop drag polling
+	dragPollMu   sync.Mutex         // Guards drag polling state
 )
 
 func BindMouse(tr *desktop.Tracker) {
-	interval := 100 * time.Millisecond
-
-	log.Info("Mouse polling interval set to 100ms")
-
-	poll(interval, func() {
-		store.PointerUpdate(store.X)
-
-		// Reset tracker handler
-		resetTracker(tr)
-
-		// Evaluate workspace state
-		updateWorkspace(tr)
-
-		// Evaluate corner state
-		updateCorner(tr)
-
-		// Evaluate focus state
-		updateFocus(tr)
-
-		// Store last pointer
-		pointer = store.Pointer
+	// Start/stop drag-time polling on button transitions
+	store.OnPointerUpdate(func(pt store.XPointer, desktop uint, screen uint) {
+		if pt.Pressed() {
+			startDragPolling(tr)
+		} else {
+			stopDragPolling()
+		}
 	})
+
+	// Refresh workspace on EWMH viewport/desktop changes
+	store.OnStateUpdate(func(state string, desktop uint, screen uint) {
+		if common.IsInList(state, []string{"_NET_CURRENT_DESKTOP", "_NET_DESKTOP_VIEWPORT", "_NET_DESKTOP_GEOMETRY", "_NET_WORKAREA"}) {
+			updateWorkspace(tr)
+		}
+	})
+}
+
+func startDragPolling(tr *desktop.Tracker) {
+	dragPollMu.Lock()
+	defer dragPollMu.Unlock()
+
+	if dragPollTick != nil {
+		return // Already polling
+	}
+
+	dragPollStop = make(chan struct{})
+	dragPollTick = time.NewTicker(100 * time.Millisecond)
+
+	// Capture ticker locally for goroutine
+	ticker := dragPollTick
+
+	go func() {
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				store.PointerUpdate(store.X)
+				resetTracker(tr)
+				pointer = store.Pointer
+			case <-dragPollStop:
+				return
+			}
+		}
+	}()
+}
+
+func stopDragPolling() {
+	dragPollMu.Lock()
+	defer dragPollMu.Unlock()
+
+	if dragPollTick == nil {
+		return // Not polling
+	}
+
+	dragPollTick.Stop()
+	close(dragPollStop)
+	dragPollTick = nil
+	dragPollStop = nil
 }
 
 func resetTracker(tr *desktop.Tracker) {
@@ -128,13 +169,7 @@ func updateFocus(tr *desktop.Tracker) {
 	})
 }
 
-func poll(interval time.Duration, fun func()) {
-	go func() {
-		for range time.Tick(interval) {
-			fun()
-		}
-	}()
-}
+
 
 func hasConfiguredCorners() bool {
 	for _, action := range common.Config.Corners {
