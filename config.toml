@@ -43,6 +43,11 @@ tiling_icon = [
     ["exit", "Exit"],
 ]
 
+##################################### Cache ###################################
+
+# Persist layout cache only on manual flush (Restart/Exit). Disables automatic persistence (false | true).
+# cache_manual_flush = false
+
 #################################### Window ####################################
 
 # Regex RE2 syntax to ignore windows (WM_CLASS string can be found by running `xprop WM_CLASS`).

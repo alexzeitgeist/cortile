@@ -40,6 +40,7 @@ type Configuration struct {
 	Keys              map[string]string `toml:"keys"`                // Event bindings for keyboard shortcuts
 	Corners           map[string]string `toml:"corners"`             // Event bindings for hot-corner actions
 	Systray           map[string]string `toml:"systray"`             // Event bindings for systray icon
+	CacheManualFlush  bool              `toml:"cache_manual_flush"`  // Only persist cache on manual flush
 }
 
 func InitConfig() {

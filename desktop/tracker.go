@@ -40,6 +40,7 @@ type Tracker struct {
 	stateMu     sync.RWMutex                    // Guards Clients and Workspaces maps
 	writeMu     sync.Mutex                      // Guards deferred write state
 	writeTimer  *time.Timer                     // Timer to flush deferred writes
+	manualFlush bool                            // Persist cache only on manual flush
 }
 type Channels struct {
 	Event  chan string // Channel for events
@@ -93,7 +94,12 @@ func CreateTracker() *Tracker {
 			SwapClient:   &Handler{},
 			SwapScreen:   &Handler{},
 		},
-		writeQueue: make(chan writeRequest, 1),
+		writeQueue:  make(chan writeRequest, 1),
+		manualFlush: common.Config.CacheManualFlush,
+	}
+
+	if tr.manualFlush {
+		log.Warn("Cache manual flush mode enabled: automatic persistence disabled until flush")
 	}
 
 	// Start background writer
@@ -907,6 +913,11 @@ func (tr *Tracker) isTrackableInfo(info *store.Info) bool {
 }
 
 func (tr *Tracker) ScheduleWrite() {
+	if tr.manualFlush {
+		log.Trace("tracker.write.manual-flush-mode")
+		return
+	}
+
 	now := time.Now()
 	// Trailing debounce target
 	debounceAt := now.Add(writeDebounce)
