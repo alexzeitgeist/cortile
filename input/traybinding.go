@@ -215,6 +215,11 @@ func items(tr *desktop.Tracker) {
 			}
 		}(action)
 	}
+
+	// Ensure the tray icon is populated even if no EWMH events fire right away.
+	if ws := tr.ActiveWorkspace(); ws != nil {
+		ui.UpdateIcon(ws)
+	}
 }
 
 func messages(tr *desktop.Tracker) {
