@@ -116,6 +116,10 @@ func ExecuteAction(action string, tr *desktop.Tracker, ws *desktop.Workspace) bo
 }
 
 func ExecuteActions(action string, tr *desktop.Tracker, mod string) bool {
+	if tr == nil {
+		return false
+	}
+
 	client := tr.ClientWorkspace(tr.ActiveClient())
 	active := tr.ActiveWorkspace()
 
@@ -124,9 +128,18 @@ func ExecuteActions(action string, tr *desktop.Tracker, mod string) bool {
 		active = client
 	}
 
+	// Guard restricted modifiers until a workspace exists
+	if (mod == "current" || mod == "screens") && active == nil {
+		log.Debug("Skip action ", action, ": no active workspace yet for modifier ", mod)
+		return false
+	}
+
 	// Execute actions per workspace
 	results := []bool{}
 	for _, ws := range tr.Workspaces {
+		if ws == nil {
+			continue
+		}
 
 		// Execute only on active screen
 		if mod == "current" && ws.Location != active.Location {

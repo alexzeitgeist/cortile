@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"syscall"
+	"time"
 
 	"runtime/debug"
 
@@ -114,6 +115,7 @@ func runMain() {
 
 	// Init root properties
 	store.InitRoot()
+	store.WaitForValidTopology(10, 500*time.Millisecond)
 
 	// Create tracker instance
 	tr := desktop.CreateTracker()
@@ -121,8 +123,7 @@ func runMain() {
 	tr.Update()
 
 	// Show layout overlay
-	ws := tr.ActiveWorkspace()
-	if ws.TilingEnabled() {
+	if ws := tr.ActiveWorkspace(); ws != nil && ws.TilingEnabled() {
 		ui.ShowLayout(ws)
 	}
 

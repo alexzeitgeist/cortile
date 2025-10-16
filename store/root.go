@@ -158,6 +158,46 @@ func InitRoot() {
 	go monitorRandREvents()
 }
 
+func WaitForValidTopology(attempts int, delay time.Duration) {
+	if attempts <= 0 {
+		attempts = 10
+	}
+	if delay <= 0 {
+		delay = 500 * time.Millisecond
+	}
+	for i := 0; i < attempts; i++ {
+		if Workplace != nil && Workplace.DesktopCount > 0 && Workplace.ScreenCount > 0 {
+			return
+		}
+		log.WithFields(log.Fields{
+			"attempt": i + 1,
+			"max":     attempts,
+		}).Warn("Waiting for valid WM topology")
+
+		time.Sleep(delay)
+
+		if Workplace == nil {
+			Workplace = &XWorkplace{}
+		}
+		if X == nil {
+			continue
+		}
+
+		Workplace.DesktopCount = NumberOfDesktopsGet(X)
+		Workplace.Displays = DisplaysGet(X)
+		Workplace.ScreenCount = uint(len(Workplace.Displays.Screens))
+		Workplace.CurrentDesktop = CurrentDesktopGet(X)
+		if Pointer != nil {
+			Workplace.CurrentScreen = ScreenGet(Pointer.Position)
+		}
+	}
+
+	log.WithFields(log.Fields{
+		"desktops": Workplace.DesktopCount,
+		"screens":  Workplace.ScreenCount,
+	}).Warn("Proceeding without confirmed WM topology")
+}
+
 func Connected() bool {
 	var err error
 	var connected bool

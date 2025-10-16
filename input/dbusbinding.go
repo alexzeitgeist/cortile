@@ -221,12 +221,16 @@ func event(ch chan string, tr *desktop.Tracker) {
 				if !hc.Active {
 					continue
 				}
+				ws := tr.ActiveWorkspace()
+				if ws == nil {
+					continue
+				}
 				SetProperty("Corner", struct {
 					Name     string
 					Location store.Location
 				}{
 					Name:     hc.Name,
-					Location: tr.ActiveWorkspace().Location,
+					Location: ws.Location,
 				})
 			}
 		}

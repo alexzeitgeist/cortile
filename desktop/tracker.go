@@ -123,7 +123,7 @@ func (tr *Tracker) UpdateOnDesktopSwitch() {
 func (tr *Tracker) update(forceRefreshDesktop bool) {
 	start := time.Now()
 	ws := tr.ActiveWorkspace()
-	if ws.TilingDisabled() {
+	if ws == nil || ws.TilingDisabled() {
 		return
 	}
 	tracked := tr.snapshotClients()
@@ -677,8 +677,10 @@ func (tr *Tracker) handleMoveClient(c *store.Client) {
 		// Check if target point moves to another screen
 		tr.Handlers.SwapScreen.Reset()
 		if c.GetLatest().Location.Screen != targetScreen {
-			tr.Handlers.SwapScreen = &Handler{Source: c, Target: tr.WorkspaceAt(targetDesktop, targetScreen)}
-			log.Debug("Screen swap handler active [", c.GetLatest().Class, "]")
+			if targetWorkspace := tr.WorkspaceAt(targetDesktop, targetScreen); targetWorkspace != nil {
+				tr.Handlers.SwapScreen = &Handler{Source: c, Target: targetWorkspace}
+				log.Debug("Screen swap handler active [", c.GetLatest().Class, "]")
+			}
 		}
 	}
 }
@@ -709,7 +711,16 @@ func (tr *Tracker) handleSwapClient(h *Handler) {
 }
 
 func (tr *Tracker) handleWorkspaceChange(h *Handler) {
-	c, target := h.Source.(*store.Client), h.Target.(*Workspace)
+	c, ok := h.Source.(*store.Client)
+	if !ok || c == nil {
+		return
+	}
+	target, ok := h.Target.(*Workspace)
+	if !ok || target == nil {
+		log.Debug("Client workspace handler skipped: missing target workspace")
+		h.Reset()
+		return
+	}
 	if !tr.isTracked(c.Window.Id) {
 		return
 	}
@@ -717,6 +728,10 @@ func (tr *Tracker) handleWorkspaceChange(h *Handler) {
 
 	// Remove client from current workspace
 	ws := tr.ClientWorkspace(c)
+	if ws == nil {
+		log.Debug("Client workspace handler skipped: source workspace unavailable")
+		return
+	}
 	mg := ws.ActiveLayout().GetManager()
 	master := mg.IsMaster(c)
 	ws.RemoveClient(c)
@@ -735,6 +750,10 @@ func (tr *Tracker) handleWorkspaceChange(h *Handler) {
 
 	// Add client to new workspace
 	ws = tr.ClientWorkspace(c)
+	if ws == nil {
+		log.Debug("Client workspace handler skipped: destination workspace unavailable")
+		return
+	}
 	if tr.Handlers.SwapScreen.Active() && target.TilingEnabled() {
 		ws = target
 	}
@@ -854,7 +873,9 @@ func (tr *Tracker) onPointerUpdate(pointer store.XPointer, desktop uint, screen 
 
 			// Tile workspace
 			if buttonReleased {
-				tr.Tile(tr.ActiveWorkspace())
+				if ws := tr.ActiveWorkspace(); ws != nil {
+					tr.Tile(ws)
+				}
 			}
 		}
 	})
@@ -885,7 +906,9 @@ func (tr *Tracker) attachHandlers(c *store.Client) {
 			tr.handleMaximizedClient(c)
 			tr.handleMinimizedClient(c)
 		} else if aname == "_NET_WM_DESKTOP" {
-			tr.handleWorkspaceChange(&Handler{Source: c, Target: tr.ActiveWorkspace()})
+			if target := tr.ActiveWorkspace(); target != nil {
+				tr.handleWorkspaceChange(&Handler{Source: c, Target: target})
+			}
 		}
 	}).Connect(store.X, c.Window.Id)
 }
